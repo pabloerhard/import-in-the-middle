@@ -8,7 +8,7 @@
         },
         "import": {
           "node":"./something.mjs",
-          "default": "./something.js"
+          "default": "./something.mjs"
         }
       },
       "#main-entry-point-string" : "./something.js",
