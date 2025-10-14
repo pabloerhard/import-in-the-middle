@@ -2,9 +2,11 @@
 //
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2021 Datadog, Inc.
 
-const { URL, fileURLToPath } = require('url')
-const { inspect } = require('util')
-const { builtinModules } = require('module')
+import { URL, fileURLToPath } from 'url'
+import { inspect } from 'util'
+import { builtinModules } from 'module'
+import { getExports as getExportsImpl } from './lib/get-exports.mjs'
+
 const specifiers = new Map()
 const isWin = process.platform === 'win32'
 let experimentalPatchInternals = false
@@ -17,14 +19,14 @@ const NODE_MAJOR = Number(NODE_VERSION[0])
 const NODE_MINOR = Number(NODE_VERSION[1])
 const HANDLED_FORMATS = new Set(['builtin', 'module', 'commonjs'])
 
-let entrypoint
-
 let getExports
 if (NODE_MAJOR >= 20 || (NODE_MAJOR === 18 && NODE_MINOR >= 19)) {
-  getExports = require('./lib/get-exports.js')
+  getExports = getExportsImpl
 } else {
   getExports = (url) => import(url).then(Object.keys)
 }
+
+let entrypoint
 
 function hasIitm (url) {
   try {
@@ -35,7 +37,7 @@ function hasIitm (url) {
 }
 
 function isIitm (url, meta) {
-  return url === meta.url || url === meta.url.replace('hook.mjs', 'hook.js')
+  return url === meta.url || url === meta.url.replace('hook.mjs', 'create-hook.mjs')
 }
 
 function deleteIitm (url) {
@@ -284,7 +286,7 @@ function addIitm (url) {
   return needsToAddFileProtocol(urlObj) ? 'file:' + urlObj.href : urlObj.href
 }
 
-function createHook (meta) {
+export function createHook (meta) {
   let cachedResolve
   const iitmURL = new URL('lib/register.js', meta.url).toString()
   let includeModules, excludeModules
@@ -494,5 +496,3 @@ register(${JSON.stringify(realUrl)}, _, set, get, ${JSON.stringify(specifiers.ge
     }
   }
 }
-
-module.exports = { createHook }
