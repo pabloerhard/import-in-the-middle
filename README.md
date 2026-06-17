@@ -115,6 +115,36 @@ fs.readFileSync('file.txt')
 node --import=./instrument.mjs ./my-app.mjs
 ```
 
+## Synchronous loader hooks
+
+On Node.js versions that provide
+[`module.registerHooks()`](https://nodejs.org/api/module.html#moduleregisterhooksoptions)
+(>= 22.15.0 / >= 24.0.0) the loader can run *synchronously*, on the application
+thread, instead of on the separate thread that `module.register()` uses. Running
+in-thread removes the message channel: `Hook()` registrations are visible to the
+loader directly, so the `createAddHookMessageChannel` /
+`waitForAllMessagesAcknowledged` step shown above is unnecessary.
+
+`instrument.mjs`
+
+```js
+import { register } from 'import-in-the-middle/register-hooks.mjs'
+import { Hook } from 'import-in-the-middle'
+
+register({ include: ['package-i-want-to-include'] })
+
+Hook(['package-i-want-to-include'], (exported, name, baseDir) => {
+  // Instrument the module
+})
+```
+
+```shell
+node --import=./instrument.mjs ./my-app.mjs
+```
+
+`register()` accepts the same `include` / `exclude` options as the asynchronous
+loader and throws on a Node.js version without `module.registerHooks()`.
+
 ## Limitations
 
 * You cannot add new exports to a module. You can only modify existing ones.

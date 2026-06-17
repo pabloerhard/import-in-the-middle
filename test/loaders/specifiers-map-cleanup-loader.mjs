@@ -5,13 +5,15 @@ import { Buffer } from 'buffer'
 // Keeping this file outside of `test/hook/` avoids having the test runner execute it directly.
 
 const createHookUrl = new URL('../../create-hook.mjs', import.meta.url)
-const getExportsUrl = new URL('../../lib/get-exports.mjs', import.meta.url)
 
 let src = readFileSync(createHookUrl, 'utf8')
-src = src.replace(
-  "from './lib/get-exports.mjs'",
-  `from ${JSON.stringify(getExportsUrl.href)}`
-)
+// We evaluate a modified copy of create-hook.mjs from a data: URL (to append
+// `export { specifiers }`). data: URLs have no hierarchical base, so rewrite
+// every relative `./lib/...` import to an absolute file URL first.
+src = src.replace(/from '(\.\/lib\/[^']+)'/g, (_match, relative) => {
+  const absolute = new URL('../../' + relative.slice(2), import.meta.url).href
+  return `from ${JSON.stringify(absolute)}`
+})
 src += '\nexport { specifiers }\n'
 
 const dataUrl = `data:text/javascript;base64,${Buffer.from(src).toString('base64')}`

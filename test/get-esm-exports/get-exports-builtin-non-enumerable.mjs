@@ -1,21 +1,40 @@
 import { strictEqual, ok } from 'assert'
+import { createRequire } from 'module'
 import { getExports, hasModuleExportsCJSDefault } from '../../lib/get-exports.mjs'
+import { driveAsync } from '../../lib/io.mjs'
 
-// getExports should use Object.getOwnPropertyNames (not Object.keys) so that
-// non-enumerable properties of Node built-in modules are included.
-// fs.F_OK, R_OK, W_OK, X_OK are non-enumerable on require('fs') but are
-// real exports that should be discoverable.
-const mockParentLoad = async () => ({ source: null, format: 'builtin' })
+// getExports must use Object.getOwnPropertyNames (not Object.keys) so that
+// NON-ENUMERABLE own properties of a Node built-in are still discovered.
+//
+// `node:events` is the EventEmitter constructor (a function), so `prototype`
+// (and `name`/`length`) are always non-enumerable own properties on every
+// supported Node version. We deliberately avoid the fs.F_OK/R_OK/... constants
+// used previously: Node removed those deprecated top-level aliases in v25
+// (DEP0176), so they no longer exist to assert against on Node >= 25.
+//
+// getExports is a "sans-io" generator (see lib/io.mjs); drive it with the async
+// driver and a stub `load` that reports the module as a sourceless builtin,
+// just as the off-thread loader's nextLoad does for built-in modules.
+const require = createRequire(import.meta.url)
+const builtin = 'node:events'
+const moduleValue = require(builtin)
+const enumerableNames = new Set(Object.keys(moduleValue))
+const nonEnumerableNames = Object.getOwnPropertyNames(moduleValue)
+  .filter((name) => !enumerableNames.has(name))
 
-const exports = await getExports('node:fs', { format: 'builtin' }, mockParentLoad)
+const io = { load: async () => ({ source: null, format: 'builtin' }) }
 
-ok(exports.has('F_OK'), 'F_OK (non-enumerable on require("fs")) should be in exports')
-ok(exports.has('R_OK'), 'R_OK should be in exports')
-ok(exports.has('W_OK'), 'W_OK should be in exports')
-ok(exports.has('X_OK'), 'X_OK should be in exports')
+const exports = await driveAsync(getExports(builtin, { format: 'builtin' }), io)
 
-// Sanity check: enumerable exports should still be present
-ok(exports.has('readFile'), 'readFile should be in exports')
+// The whole point: non-enumerable own properties (e.g. `prototype`) that
+// Object.keys would miss must still be discovered.
+ok(nonEnumerableNames.length > 0, `precondition: ${builtin} has non-enumerable own properties`)
+for (const name of nonEnumerableNames) {
+  ok(exports.has(name), `non-enumerable ${name} should be in exports`)
+}
+
+// Sanity check: an enumerable export should still be present.
+ok(exports.has('once'), 'enumerable export (once) should be in exports')
 ok(exports.has('default'), 'default should be in exports')
 
 // Node >= 23 adds `module.exports` as an alias for the default export in CJS modules
