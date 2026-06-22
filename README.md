@@ -145,6 +145,36 @@ node --import=./instrument.mjs ./my-app.mjs
 `register()` accepts the same `include` / `exclude` options as the asynchronous
 loader and throws on a Node.js version without `module.registerHooks()`.
 
+### Custom matching with `shouldInclude`
+
+Instead of `include` / `exclude` lists, you can pass a `shouldInclude(url, specifier)`
+predicate to decide which modules are intercepted. It is called for every resolved
+module with the resolved URL and the import specifier; return a truthy value to
+intercept the module. When a predicate is provided it takes over the decision and
+the `include` / `exclude` options are ignored.
+
+This is useful when matching doesn't map cleanly onto bare specifiers, file URLs and
+regular expressions — for example a matcher built from your own configuration, or a
+decision that depends on more than the specifier.
+
+```js
+import { register } from 'import-in-the-middle/register-hooks.mjs'
+
+register({
+  shouldInclude (url, specifier) {
+    return specifier === 'package-i-want-to-include' ||
+      url.includes('/node_modules/some-scope/')
+  }
+})
+```
+
+The predicate receives only the URL and the specifier, never a resolved file path.
+Because `module.register()` transfers its `data` to the loader thread by structured
+clone — which cannot carry a function — `shouldInclude` is supported for synchronous
+registration (`register-hooks.mjs`, shown above) and for predicates constructed on
+the loader thread; it is not accepted through the `data` option of the asynchronous
+`module.register('import-in-the-middle/hook.mjs', ...)`.
+
 ## Limitations
 
 * You cannot add new exports to a module. You can only modify existing ones.

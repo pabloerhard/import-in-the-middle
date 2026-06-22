@@ -353,6 +353,7 @@ export function createHook (meta) {
   let cachedResolve
   const iitmURL = new URL('lib/register.js', meta.url).toString()
   let includeModules, excludeModules
+  let shouldInclude = defaultShouldInclude
 
   // Track CJS module URLs that IITM has wrapped. On Node 24+, CJS modules loaded
   // via loadCJSModule (in an ESM import chain) have their require() calls for
@@ -362,6 +363,43 @@ export function createHook (meta) {
   // patterns like `class App extends require('events') {}`.
   const cjsInIitmChain = new Set()
 
+  // Default matcher, used unless the consumer supplies its own `shouldInclude`
+  // (see applyOptions). It applies the include/exclude lists, so finishResolve
+  // always has a predicate to call and never has to special-case its absence.
+  //
+  // We check the specifier to match libraries loaded with bare specifiers from
+  // node_modules, and the full file URL for non-bare specifier imports (relative
+  // paths would be error prone). An absolute path entry added via Hook over the
+  // message port matches the resolved file path, so it is resolved here.
+  function defaultShouldInclude (url, specifier) {
+    let resultPath
+    if (url.startsWith('file:')) {
+      const stackTraceLimit = Error.stackTraceLimit
+      Error.stackTraceLimit = 0
+      try {
+        resultPath = fileURLToPath(url)
+      } catch {}
+      Error.stackTraceLimit = stackTraceLimit
+    }
+    function match (each) {
+      if (each instanceof RegExp) {
+        return each.test(url)
+      }
+
+      return each === specifier || each === url || (resultPath && each === resultPath)
+    }
+
+    if (includeModules && !includeModules.some(match)) {
+      return false
+    }
+
+    if (excludeModules && excludeModules.some(match)) {
+      return false
+    }
+
+    return true
+  }
+
   // Applies the include/exclude/message-port configuration. Shared by the
   // asynchronous `initialize` (off-thread `module.register`, which receives
   // `data` over the registration boundary) and by synchronous registration
@@ -370,6 +408,13 @@ export function createHook (meta) {
   function applyOptions (data) {
     includeModules = ensureArrayWithBareSpecifiersFileUrlsAndRegex(data.include, 'include')
     excludeModules = ensureArrayWithBareSpecifiersFileUrlsAndRegex(data.exclude, 'exclude')
+
+    // A consumer can supply its own matcher as `shouldInclude(url, specifier)`,
+    // taking ownership of the include/exclude decision instead of expressing it
+    // as bare-specifier / file-URL / regex lists. It replaces the default list
+    // matcher and is called with the resolved URL and specifier; otherwise the
+    // default applies the include/exclude options.
+    shouldInclude = typeof data.shouldInclude === 'function' ? data.shouldInclude : defaultShouldInclude
 
     if (data.addHookMessagePort) {
       data.addHookMessagePort.on('message', (modules) => {
@@ -417,6 +462,12 @@ export function createHook (meta) {
       return result
     }
 
+    // Never wrap a module whose format we don't handle (e.g. json, wasm); this
+    // holds regardless of how inclusion is decided below.
+    if (result.format && !HANDLED_FORMATS.has(result.format)) {
+      return result
+    }
+
     // The synchronous hooks (`module.registerHooks`) fire for `require()` as well
     // as `import`, but iitm only owns the ESM graph: CommonJS modules are
     // instrumented separately through require-in-the-middle, and `require()` must
@@ -430,37 +481,9 @@ export function createHook (meta) {
       return result
     }
 
-    // For included/excluded modules, we check the specifier to match libraries
-    // that are loaded with bare specifiers from node_modules.
-    //
-    // For non-bare specifier imports, we match to the full file URL because
-    // using relative paths would be very error prone!
-    let resultPath
-    if (result.url.startsWith('file:')) {
-      const stackTraceLimit = Error.stackTraceLimit
-      Error.stackTraceLimit = 0
-      try {
-        resultPath = fileURLToPath(result.url)
-      } catch {}
-      Error.stackTraceLimit = stackTraceLimit
-    }
-    function match (each) {
-      if (each instanceof RegExp) {
-        return each.test(result.url)
-      }
-
-      return each === specifier || each === result.url || (resultPath && each === resultPath)
-    }
-
-    if (result.format && !HANDLED_FORMATS.has(result.format)) {
-      return result
-    }
-
-    if (includeModules && !includeModules.some(match)) {
-      return result
-    }
-
-    if (excludeModules && excludeModules.some(match)) {
+    // `shouldInclude` is always set (the include/exclude list matcher by default,
+    // a consumer-provided predicate otherwise), so no nullish check is needed.
+    if (!shouldInclude(result.url, specifier)) {
       return result
     }
 
