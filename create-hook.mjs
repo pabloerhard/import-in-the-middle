@@ -17,7 +17,11 @@ const isWin = process.platform === 'win32'
 // FIXME: Typescript extensions are added temporarily until we find a better
 // way of supporting arbitrary extensions
 const EXTENSION_RE = /\.(js|mjs|cjs|ts|mts|cts)$/
-const HANDLED_FORMATS = new Set(['builtin', 'module', 'commonjs'])
+// The `-typescript` formats are listed unconditionally; getExports strips the
+// types when the runtime supports it and otherwise falls back to onWrapFailure.
+const HANDLED_FORMATS = new Set([
+  'builtin', 'module', 'commonjs', 'module-typescript', 'commonjs-typescript'
+])
 const TRACE_WARNINGS = process.execArgv.includes('--trace-warnings')
 
 // process.versions.node is always "major.minor.patch" (nightlies add a suffix

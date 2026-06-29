@@ -175,6 +175,34 @@ registration (`register-hooks.mjs`, shown above) and for predicates constructed 
 the loader thread; it is not accepted through the `data` option of the asynchronous
 `module.register('import-in-the-middle/hook.mjs', ...)`.
 
+## TypeScript modules
+
+On Node.js versions that strip TypeScript types natively (those exposing
+[`module.stripTypeScriptTypes()`](https://nodejs.org/api/module.html#modulestriptypescripttypescode-options),
+>= 22.13.0 / >= 23.9.0 / >= 24.0.0), `import-in-the-middle` intercepts `.ts`,
+`.mts` and `.cts` modules just like their JavaScript counterparts. The types are
+stripped before the module's exports are read, so type-only exports
+(`export type`, `export interface`) are not present on the intercepted
+namespace; value exports are.
+
+```ts
+// math.mts
+export type Op = '+' | '-'
+export function add (a: number, b: number): number {
+  return a + b
+}
+```
+
+```js
+Hook(['./math.mts'], (exported) => {
+  // `exported.add` is interceptable; the `Op` type is not part of the namespace
+})
+```
+
+On Node.js versions where type stripping is not enabled by default, run with
+`--experimental-strip-types`. Older versions that predate
+`module.stripTypeScriptTypes()` leave TypeScript modules untouched.
+
 ## Limitations
 
 * You cannot add new exports to a module. You can only modify existing ones.
