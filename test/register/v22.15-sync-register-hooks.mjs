@@ -43,8 +43,11 @@ nodeModule.registerHooks({
     if (url === WRAP_FAIL_URL) {
       const next = (loadCounts.get(url) || 0) + 1
       loadCounts.set(url, next)
-      // Invalid JS first (IITM parsing fails), valid JS afterwards (fallback).
-      const source = next === 1 ? 'export const = 1\n' : 'export const ok = 1\n'
+      // Un-tokenizable source first (the lexer throws, so IITM wrapping fails),
+      // valid JS afterwards (fallback). es-module-lexer tolerates some
+      // invalid-but-tokenizable source a full parser rejects, so the failure
+      // case has to be genuinely un-tokenizable (unterminated template literal).
+      const source = next === 1 ? 'export const ok = `unterminated\n' : 'export const ok = 1\n'
       return { format: 'module', source, shortCircuit: true }
     }
     if (url === WRAP_FAIL_CJS_URL) {

@@ -24,9 +24,18 @@ export default function* () { /* … */ } //| default
 
 // Aggregating modules
 export * from "module-name"; //| * from module-name
+export /* c */ * /* c */ from "module-name"; //| * from module-name
 export * as name1 from "module-name"; //| name1
 export { name1, /* …, */ nameN } from "module-name"; //| name1,nameN
 export { import1 as name1, import2 as name2, /* …, */ nameN } from "module-name"; //| name1,name2,nameN
 export { default, /* …, */ } from "module-name"; //| default
 export { default as name1 } from "module-name"; //| name1
+
+// Escaped-identifier exports. The lexer reports the raw spelling; the cooked
+// name is what the module namespace actually exposes, so getEsmExports decodes
+// these to match (\u0061 -> a, \u0062 -> b, ...).
+export const \u0061 = 1; //| a
+let \u0062; export { \u0062 }; //| b
+export function \u0066 () {} //| f
+export class \u0043 {} //| C
 

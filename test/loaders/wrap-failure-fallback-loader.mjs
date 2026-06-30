@@ -1,7 +1,9 @@
-// Upstream loader that returns invalid JS the first time a specific module is
-// loaded. This simulates loaders/transforms that can temporarily return
-// unparsable code, and is used to ensure IITM falls back gracefully when
-// wrapping fails.
+// Upstream loader that returns unparsable source the first time a specific
+// module is loaded. This simulates loaders/transforms that can temporarily
+// return corrupted code, and is used to ensure IITM falls back gracefully when
+// wrapping fails. The source must be un-tokenizable (here: an unterminated
+// template literal) so es-module-lexer rejects it; the lexer tolerates some
+// invalid-but-tokenizable source that a full parser would reject.
 
 const WRAP_FAIL_URL = new URL('file:///virtual/wrap-failure.mjs').href
 
@@ -25,8 +27,9 @@ export async function load (url, context, parentLoad) {
     const next = (loadCounts.get(url) || 0) + 1
     loadCounts.set(url, next)
     if (next === 1) {
-      // Invalid JS (forces IITM wrapping/parsing to fail).
-      return { format: 'module', source: 'export const = 1\n', shortCircuit: true }
+      // Un-tokenizable source (unterminated template literal) forces the lexer
+      // to throw, so IITM wrapping fails and falls back.
+      return { format: 'module', source: 'export const ok = `unterminated\n', shortCircuit: true }
     }
     // Valid JS on subsequent loads so the app can proceed.
     return { format: 'module', source: 'export const ok = 1\n', shortCircuit: true }
