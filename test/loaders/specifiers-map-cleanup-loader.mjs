@@ -9,8 +9,9 @@ const createHookUrl = new URL('../../create-hook.mjs', import.meta.url)
 let src = readFileSync(createHookUrl, 'utf8')
 // We evaluate a modified copy of create-hook.mjs from a data: URL (to append
 // `export { specifiers }`). data: URLs have no hierarchical base, so rewrite
-// every relative `./lib/...` import to an absolute file URL first.
-src = src.replace(/from '(\.\/lib\/[^']+)'/g, (_match, relative) => {
+// every relative `./...` import (./lib/*, ./supports-sync-hooks.mjs, ...) to an
+// absolute file URL first.
+src = src.replace(/from '(\.\/[^']+)'/g, (_match, relative) => {
   const absolute = new URL('../../' + relative.slice(2), import.meta.url).href
   return `from ${JSON.stringify(absolute)}`
 })

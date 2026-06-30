@@ -17,7 +17,8 @@ export type RegisterHooksOptions = {
  * synchronous hooks run on the application thread, so `Hook()` registrations are
  * visible to the loader directly and no acknowledgement step is required.
  *
- * Requires a Node.js version with `module.registerHooks()` (>= 22.15.0 / >= 24).
+ * Requires a Node.js version where {@link supportsSyncHooks} is `true`
+ * (>= 22.22.3, >= 24.11.1, >= 25.1.0, or >= 26.0.0).
  *
  * ```ts
  * import { register } from 'import-in-the-middle/register-hooks.mjs'
@@ -30,6 +31,14 @@ export type RegisterHooksOptions = {
  * })
  * ```
  *
- * @throws If `module.registerHooks()` is unavailable in the running Node.js.
+ * @throws If {@link supportsSyncHooks} is `false` in the running Node.js.
  */
 export declare function register(options?: RegisterHooksOptions): void
+
+/**
+ * Whether the running Node.js can correctly run the synchronous loader via
+ * `module.registerHooks()`. `false` on versions that ship `module.registerHooks()`
+ * but predate the nullish-CommonJS-`source` fix (nodejs/node#59929); branch on it
+ * to fall back to the asynchronous `module.register()` loader.
+ */
+export declare function supportsSyncHooks(): boolean

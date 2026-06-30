@@ -117,13 +117,32 @@ node --import=./instrument.mjs ./my-app.mjs
 
 ## Synchronous loader hooks
 
-On Node.js versions that provide
+On Node.js versions that support
 [`module.registerHooks()`](https://nodejs.org/api/module.html#moduleregisterhooksoptions)
-(>= 22.15.0 / >= 24.0.0) the loader can run *synchronously*, on the application
-thread, instead of on the separate thread that `module.register()` uses. Running
-in-thread removes the message channel: `Hook()` registrations are visible to the
-loader directly, so the `createAddHookMessageChannel` /
-`waitForAllMessagesAcknowledged` step shown above is unnecessary.
+the loader can run *synchronously*, on the application thread, instead of on the
+separate thread that `module.register()` uses. Running in-thread removes the
+message channel: `Hook()` registrations are visible to the loader directly, so
+the `createAddHookMessageChannel` / `waitForAllMessagesAcknowledged` step shown
+above is unnecessary.
+
+`module.registerHooks()` was added in 22.15.0 / 24.0.0, but its synchronous load
+hook rejected the nullish CommonJS `source` the loader returns for `require()`s
+pulled into the ESM graph until [nodejs/node#59929][]. The fix shipped in
+**22.22.3, 24.11.1, 25.1.0 and 26.0.0**; earlier versions ship
+`module.registerHooks()` but cannot run the synchronous loader. Use
+`supportsSyncHooks()` to branch on this rather than a hand-written version check:
+
+```js
+import { register, supportsSyncHooks } from 'import-in-the-middle/register-hooks.mjs'
+
+if (supportsSyncHooks()) {
+  register({ include: ['package-i-want-to-include'] })
+} else {
+  // Fall back to the asynchronous loader, e.g. module.register('import-in-the-middle/hook.mjs').
+}
+```
+
+[nodejs/node#59929]: https://github.com/nodejs/node/pull/59929
 
 `instrument.mjs`
 
@@ -143,7 +162,7 @@ node --import=./instrument.mjs ./my-app.mjs
 ```
 
 `register()` accepts the same `include` / `exclude` options as the asynchronous
-loader and throws on a Node.js version without `module.registerHooks()`.
+loader and throws on a Node.js version where `supportsSyncHooks()` is `false`.
 
 ### Custom matching with `shouldInclude`
 
