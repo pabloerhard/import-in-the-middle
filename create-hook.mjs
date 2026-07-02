@@ -195,11 +195,21 @@ function emitWarning (err) {
  * of how the loader is driven, so both the synchronous and asynchronous paths
  * share it.
  *
+ * The value is read from `namespaceVar`, the wrapper's namespace binding for the
+ * module that *defines* the export. For a module's own exports that is the
+ * wrapped module itself; for a name re-exported through `export *` it is the
+ * leaf that declares it. Reading from the defining module rather than the
+ * aggregating one keeps the value resolvable when the same binding reaches the
+ * aggregator through more than one re-export chain — Node sees those chains as
+ * distinct wrapper modules and leaves the name ambiguous (hence `undefined`) on
+ * the aggregate namespace, while the defining module always holds it (#171).
+ *
  * @param {string} n The exported name.
  * @param {string} srcUrl The URL of the module the export belongs to.
+ * @param {string} namespaceVar The wrapper binding holding `srcUrl`'s namespace.
  * @returns {string}
  */
-function buildSetter (n, srcUrl) {
+function buildSetter (n, srcUrl, namespaceVar) {
   const variableName = `$${n.replace(/[^a-zA-Z0-9_$]/g, '_')}`
   const objectKey = JSON.stringify(n)
   const reExportedName = n === 'default' ? n : objectKey
@@ -214,7 +224,7 @@ function buildSetter (n, srcUrl) {
     : `export { ${variableName} as ${reExportedName} }`
 
   return `let ${variableName}
-__bind(${objectKey}, v => { ${variableName} = v }, () => ${variableName}${fallback})
+__bind(${objectKey}, ${namespaceVar}, v => { ${variableName} = v }, () => ${variableName}${fallback})
 ${reExportLine}`
 }
 
@@ -240,37 +250,74 @@ ${reExportLine}`
  * created lazily once `depth` crosses {@link STAR_CYCLE_DEPTH}. A URL is added
  * before descending into its subtree and removed once that subtree finishes, so
  * it tracks the active path rather than every URL ever visited.
+ * @param {Map<string, string>} [params.originNamespaces] Shared registry mapping
+ * a defining-module URL to the wrapper namespace alias a same-origin `export *`
+ * collision must read it from. Absent until the first such collision; then
+ * threaded through the recursion so one defining module yields one alias and
+ * {@link buildWrapperSource} imports each once. Only `*`-collided names use it;
+ * every other export reads from the wrapped module's own `namespace`.
  *
- * @returns {Generator<Array, Map<string, string>>} A generator that yields I/O
- * operations and ultimately returns the shimmed setters for all the exports
- * from the module and any transitive export all modules.
+ * @returns {Generator<Array, { setters: Map<string, string>, origins: (Map<string, string> | undefined), originNamespaces: (Map<string, string> | undefined) }>}
+ * A generator that yields I/O operations and ultimately returns the shimmed
+ * setters for all the exports from the module and any transitive export all
+ * modules. `origins` (the defining module per `*`-sourced name) is `undefined`
+ * for a module with no `export *`; `originNamespaces` stays `undefined` unless a
+ * same-origin `*` collision actually needed an alias.
  */
-function * processModule ({ srcUrl, context, excludeDefault = false, depth = 0, seen }) {
+function * processModule ({ srcUrl, context, excludeDefault = false, depth = 0, seen, originNamespaces }) {
   const exportNames = yield * getExports(srcUrl, context)
-  const starExports = new Set()
   const setters = new Map()
 
-  const addSetter = (name, setter, isStarExport = false) => {
+  // Maps each live `*`-sourced name to the module that defined it. Its keys
+  // double as "this name came from a `*` re-export" (so an explicit export can
+  // override it), and its values let two `*` re-exports of the same name be told
+  // apart. Allocated on the first `export *`, never for a module without one; a
+  // single Map carries both facts so a star with no collision pays one structure
+  // and one write per name, not two.
+  let starOrigins
+
+  // A name pulled in through more than one `export *` chain that all bottom out
+  // at the same module stays exported (ECMAScript ResolveExport;
+  // tc39/ecma262#3715), but the *aggregate* namespace this wrapper imports drops
+  // it: under iitm the chains are distinct wrapped modules, so Node sees the
+  // re-export as ambiguous and the name reads back undefined. Only those names
+  // must instead read from their defining module's own namespace, which always
+  // holds the value. `originNamespaces` maps such a defining module to the alias
+  // the wrapper imports for it; it is allocated on the first surviving
+  // collision, so a module without one emits no extra import (#171).
+  const ensureOriginNamespace = (origin) => {
+    originNamespaces ??= new Map()
+    let alias = originNamespaces.get(origin)
+    if (alias === undefined) {
+      alias = `__ns${originNamespaces.size}`
+      originNamespaces.set(origin, alias)
+    }
+    return alias
+  }
+
+  const addSetter = (name, setter, isStarExport, origin) => {
     if (setters.has(name)) {
       if (isStarExport) {
-        // If there's already a matching star export, delete it
-        if (starExports.has(name)) {
-          setters.delete(name)
+        // `starOrigins.has(name)` means the existing entry also came from a `*`
+        // re-export (an explicit export would not be tracked here).
+        if (starOrigins.has(name)) {
+          if (starOrigins.get(name) === origin) {
+            // The same binding reached through two `*` re-export chains. It
+            // stays exported, but the aggregate namespace dropped it, so point
+            // its setter at the defining module's namespace instead.
+            setters.set(name, buildSetter(name, origin, ensureOriginNamespace(origin)))
+          } else {
+            // Genuinely ambiguous: two `*` re-exports name it from different
+            // modules. Per ResolveExport the name is excluded entirely.
+            setters.delete(name)
+            starOrigins.delete(name)
+          }
         }
-        // and return so this is excluded
-        return
-      }
-
-      // if we already have this export but it is from a * export, overwrite it
-      if (starExports.has(name)) {
-        starExports.delete(name)
-        setters.set(name, setter)
+        // An explicit export already shadows the `*` re-export; leave it.
       }
     } else {
-      // Store export * exports so we know they can be overridden by explicit
-      // named exports
       if (isStarExport) {
-        starExports.add(name)
+        starOrigins.set(name, origin)
       }
 
       setters.set(name, setter)
@@ -299,6 +346,9 @@ function * processModule ({ srcUrl, context, excludeDefault = false, depth = 0, 
       // parent's `format` to know if this sub-module is ESM or CJS!
       const result = yield [RESOLVE, newSpecifier, { parentURL: srcUrl }]
 
+      // First `*` re-export: allocate the origin bookkeeping lazily.
+      starOrigins ??= new Map()
+
       // `export *` graphs are normally only a handful of levels deep. A cycle
       // (`a` re-exports `b`, `b` re-exports `a`) instead recurses without bound
       // and exhausts memory. Rather than track every URL on the common shallow
@@ -316,26 +366,36 @@ function * processModule ({ srcUrl, context, excludeDefault = false, depth = 0, 
       }
 
       try {
-        const subSetters = yield * processModule({
+        const sub = yield * processModule({
           srcUrl: result.url,
           context: { ...context, format: result.format },
           excludeDefault: true,
           depth: depth + 1,
-          seen
+          seen,
+          originNamespaces
         })
 
-        for (const [name, setter] of subSetters.entries()) {
-          addSetter(name, setter, true)
+        // Adopt any registry a nested `export *` minted before processing this
+        // child's results, so a collision detected here extends the same Map the
+        // child's setters already reference (one alias per defining module across
+        // the whole tree) rather than orphaning the child's into a second Map.
+        originNamespaces ??= sub.originNamespaces
+
+        // Star targets build their setters against `namespace` like any other
+        // module; only a surviving same-origin collision (in addSetter) rewrites
+        // the affected name to read from its defining module's alias.
+        for (const [name, setter] of sub.setters) {
+          addSetter(name, setter, true, sub.origins?.get(name) ?? result.url)
         }
       } finally {
         seen?.delete(result.url)
       }
     } else {
-      addSetter(n, buildSetter(n, srcUrl))
+      addSetter(n, buildSetter(n, srcUrl, 'namespace'), false)
     }
   }
 
-  return setters
+  return { setters, origins: starOrigins, originNamespaces }
 }
 
 function addIitm (url) {
@@ -577,11 +637,23 @@ export function createHook (meta) {
   // Builds the wrapper module source that re-exports the real module through
   // iitm's proxy. Pure string generation shared by the asynchronous and
   // synchronous `load` paths.
-  function buildWrapperSource (realUrl, setters, originalSpecifier) {
+  function buildWrapperSource (realUrl, setters, originalSpecifier, originNamespaces) {
+    // The wrapped module imports its namespace as `namespace`, which serves
+    // every export but the ones a same-origin `export *` collision forced onto
+    // their defining module (#171): the aggregate namespace drops those as
+    // ambiguous under iitm, so each such defining module gets its own alias the
+    // wrapper imports. Absent the registry (no such collision) nothing is added.
+    let originImports = ''
+    if (originNamespaces !== undefined) {
+      for (const [originUrl, alias] of originNamespaces) {
+        originImports += `import * as ${alias} from ${JSON.stringify(originUrl)}\n`
+      }
+    }
+
     return `
 import { register } from '${iitmURL}'
 import * as namespace from ${JSON.stringify(realUrl)}
-
+${originImports}
 // Mimic a Module object (https://tc39.es/ecma262/#sec-module-namespace-objects).
 const _ = Object.create(null, { [Symbol.toStringTag]: { value: 'Module' } })
 const set = {}
@@ -616,10 +688,10 @@ function __flushPendingOnce () {
   __pending = next
 }
 
-function __bind (key, write, read, useFallback) {
+function __bind (key, source, write, read, useFallback) {
   const readSource = useFallback
-    ? () => namespace[key] ?? namespace['default']
-    : () => namespace[key]
+    ? () => source[key] ?? source['default']
+    : () => source[key]
   __overridden[key] = false
   let deferred = false
   try {
@@ -678,13 +750,13 @@ register(${JSON.stringify(realUrl)}, _, set, get, ${JSON.stringify(originalSpeci
   // succeeds: free the specifier entry early, and remember CJS modules so their
   // transitive require() chain bypasses iitm (see `load`). Returns the wrapper
   // module source.
-  function onWrapSuccess (realUrl, context, originalSpecifier, setters) {
+  function onWrapSuccess (realUrl, context, originalSpecifier, setters, originNamespaces) {
     specifiers.delete(realUrl)
     // context.format is set to 'commonjs' by getCjsExports during processModule.
     if (context.format === 'commonjs') {
       cjsInIitmChain.add(realUrl)
     }
-    return buildWrapperSource(realUrl, setters, originalSpecifier)
+    return buildWrapperSource(realUrl, setters, originalSpecifier, originNamespaces)
   }
 
   // Bookkeeping shared by the async and sync wrap paths when `processModule`
@@ -705,11 +777,11 @@ register(${JSON.stringify(realUrl)}, _, set, get, ${JSON.stringify(originalSpeci
       const originalSpecifier = specifiers.get(realUrl)
 
       try {
-        const setters = await driveAsync(
+        const { setters, originNamespaces } = await driveAsync(
           processModule({ srcUrl: realUrl, context }),
           { resolve: cachedResolve, load: parentGetSource }
         )
-        return { source: onWrapSuccess(realUrl, context, originalSpecifier, setters) }
+        return { source: onWrapSuccess(realUrl, context, originalSpecifier, setters, originNamespaces) }
       } catch (cause) {
         onWrapFailure(realUrl, cause)
         // Revert back to the non-iitm URL
@@ -729,11 +801,11 @@ register(${JSON.stringify(realUrl)}, _, set, get, ${JSON.stringify(originalSpeci
       const originalSpecifier = specifiers.get(realUrl)
 
       try {
-        const setters = driveSync(
+        const { setters, originNamespaces } = driveSync(
           processModule({ srcUrl: realUrl, context }),
           { resolve: cachedResolve, load: nextLoad }
         )
-        return { source: onWrapSuccess(realUrl, context, originalSpecifier, setters) }
+        return { source: onWrapSuccess(realUrl, context, originalSpecifier, setters, originNamespaces) }
       } catch (cause) {
         onWrapFailure(realUrl, cause)
         url = realUrl

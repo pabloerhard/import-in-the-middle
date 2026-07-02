@@ -27,3 +27,6 @@ ignorePatterns:
   - test/fixtures/duplicate-explicit.mjs
   - test/fixtures/duplicate.mjs
   - test/fixtures/export-types/default-call-expression-renamed.mjs
+  - test/fixtures/reexport-same-source.mjs
+  - test/fixtures/reexport-explicit-override.mjs
+  - test/fixtures/reexport-nested-agg.mjs
