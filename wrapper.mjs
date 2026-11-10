@@ -2,8 +2,8 @@
 //
 // Generates the same ESM facade IITM's loaders generate, for a module the
 // caller selected, using the caller's source and resolve/load adapters, plus a
-// manifest describing the facade's imports. It installs no loader hooks and
-// shares no analysis state with them.
+// manifest of the facade's imports. It installs no loader hooks and shares no
+// module analysis with them; only builtin export names are cached process-wide.
 
 import Module from 'module'
 import { types } from 'util'
@@ -12,23 +12,26 @@ import { createAnalysisState } from './lib/get-exports.mjs'
 import { driveAsync, driveSync } from './lib/io.mjs'
 import { buildWrapperSource, processModule } from './lib/wrapper.mjs'
 
-const NAME = "'import-in-the-middle' createWrapperModule"
 const runtimeUrl = new URL('lib/register.js', import.meta.url).href
 // Facades import only these relative placeholders. Callers map them to real
 // modules through the returned `imports` manifest.
 const RUNTIME_SPECIFIER = './__iitm_runtime__.js'
 const MODULE_SPECIFIER_PREFIX = './__iitm_module_'
+const BUILTIN = Object.freeze({ source: null, format: 'builtin' })
 
 function noop () {}
 
-// A builtin root has no module graph, so its adapters are never called.
-function unusedAdapter () {
-  throw new Error(`${NAME}: adapter called for a builtin root`)
+/** @param {string} name */
+function prefix (name) {
+  return `'import-in-the-middle' ${name}()`
 }
 
-/**
- * @param {string} url A `node:` URL.
- */
+// A builtin root has no module graph, so its adapters are never called.
+function unusedAdapter () {
+  throw new Error("'import-in-the-middle': adapter called for a builtin root")
+}
+
+/** @param {string} url A `node:` URL. */
 function isBuiltinUrl (url) {
   if (typeof Module.isBuiltin === 'function') return Module.isBuiltin(url)
   // Before Node.js 18.6 there is no `isBuiltin`, and `builtinModules` omits
@@ -43,81 +46,9 @@ function isBuiltinUrl (url) {
   }
 }
 
-/** @param {unknown} value */
-function isThenable (value) {
-  return value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    typeof value.then === 'function'
-}
-
-/**
- * Throws when a synchronous adapter returned a thenable. The thenable is
- * observed first so a later rejection is not reported as unhandled.
- *
- * @param {unknown} value
- * @param {string} adapter
- * @param {string} target
- */
-function assertNotThenable (value, adapter, target) {
-  if (isThenable(value)) {
-    value.then(noop, noop)
-    throw new TypeError(`${NAME}: ${adapter}() returned a Promise for '${target}', but sync: true requires a synchronous result`)
-  }
-}
-
-/**
- * @param {unknown} format
- * @param {string} adapter
- * @param {string} target
- */
-function checkFormat (format, adapter, target) {
-  if (format != null && typeof format !== 'string') {
-    throw new TypeError(`${NAME}: ${adapter}() must return a string format for '${target}'`)
-  }
-}
-
-/**
- * @param {unknown} result
- * @param {string} specifier
- */
-function checkResolved (result, specifier) {
-  if (result === null || typeof result !== 'object' || typeof result.url !== 'string' || !isAbsoluteUrl(result.url)) {
-    throw new TypeError(`${NAME}: resolve() must return an object with an absolute URL string as url for '${specifier}'`)
-  }
-  checkFormat(result.format, 'resolve', specifier)
-  return result
-}
-
-/**
- * @param {unknown} result
- * @param {string} url
- * @param {string | undefined} resolvedFormat
- */
-function checkLoaded (result, url, resolvedFormat) {
-  if (result === null || typeof result !== 'object') {
-    throw new TypeError(`${NAME}: load() must return an object for '${url}'`)
-  }
-  const { source, format } = result
-  checkFormat(format, 'load', url)
-  if (source != null && typeof source !== 'string' && !types.isAnyArrayBuffer(source) && !ArrayBuffer.isView(source)) {
-    throw new TypeError(`${NAME}: load() must return a string, ArrayBuffer or typed array source for '${url}'`)
-  }
-  // Builtins are recognized from `resolve` and never reach `load`, so a
-  // `builtin` format here names a module that is not a builtin.
-  if (format === 'builtin') {
-    throw new TypeError(`${NAME}: load() returned format 'builtin' for '${url}', which is not a builtin; resolve builtins to a node: URL`)
-  }
-  // The shared analyzer expects the effective format on the load result.
-  // Keep resolve's format unless load overrides it, without mutating the
-  // caller's result (which may be cached or frozen).
-  return { source, format: format ?? resolvedFormat }
-}
-
 /** @param {string} url */
 function isAbsoluteUrl (url) {
-  if (typeof URL.canParse === 'function') {
-    return URL.canParse(url)
-  }
+  if (typeof URL.canParse === 'function') return URL.canParse(url)
   try {
     // eslint-disable-next-line no-new
     new URL(url)
@@ -128,94 +59,145 @@ function isAbsoluteUrl (url) {
 }
 
 /**
- * @param {string} url
- * @param {string | undefined} format
+ * Validates and normalizes a `resolve` result. Builtins are exactly the
+ * `node:` URLs, always with the format `builtin`.
+ *
+ * @param {string} name
+ * @param {unknown} result
+ * @param {string} specifier
+ * @returns {{ url: string, format?: string }}
  */
-function isExternal (url, format) {
-  return url.startsWith('node:') || format === 'builtin'
+function checkResolved (name, result, specifier) {
+  if (result === null || typeof result !== 'object' || typeof result.url !== 'string' || !isAbsoluteUrl(result.url)) {
+    throw new TypeError(`${prefix(name)}: resolve() must return an object with an absolute URL string as url for '${specifier}'`)
+  }
+  const { url, format } = result
+  if (format != null && typeof format !== 'string') {
+    throw new TypeError(`${prefix(name)}: resolve() must return a string format for '${specifier}'`)
+  }
+  if (url.startsWith('node:')) {
+    if (!isBuiltinUrl(url)) {
+      throw new TypeError(`${prefix(name)}: resolve() returned '${url}' for '${specifier}', which is not a Node.js builtin`)
+    }
+    if (format != null && format !== 'builtin') {
+      throw new TypeError(`${prefix(name)}: resolve() returned format '${format}' for the builtin '${url}'`)
+    }
+    return { url, format: 'builtin' }
+  }
+  if (format === 'builtin') {
+    throw new TypeError(`${prefix(name)}: resolve() returned format 'builtin' for '${url}'; resolve builtins to a node: URL`)
+  }
+  return format == null ? { url } : { url, format }
 }
 
 /**
- * Validates options and builds the graph I/O for one call. Root source is
- * served from `options.source`, or analyzed as a builtin for a `node:` root;
- * builtins never reach the caller's `load`. The I/O also records, for this call
- * only, the formats the adapters report and the files the facade depends on.
+ * Validates a `load` result and returns the effective source and format.
+ * Load's format overrides resolve's; without one, resolve's is kept. The
+ * caller's result is not mutated, as it may be cached or frozen.
+ *
+ * @param {string} name
+ * @param {unknown} result
+ * @param {string} url
+ * @param {string | undefined} resolvedFormat
+ */
+function checkLoaded (name, result, url, resolvedFormat) {
+  if (result === null || typeof result !== 'object') {
+    throw new TypeError(`${prefix(name)}: load() must return an object for '${url}'`)
+  }
+  const { source, format } = result
+  if (format != null && typeof format !== 'string') {
+    throw new TypeError(`${prefix(name)}: load() must return a string format for '${url}'`)
+  }
+  // Builtins are recognized from `resolve` and never reach `load`.
+  if (format === 'builtin') {
+    throw new TypeError(`${prefix(name)}: load() returned format 'builtin' for '${url}'; resolve builtins to a node: URL`)
+  }
+  if (source == null) {
+    throw new TypeError(`${prefix(name)}: load() returned no source for '${url}'`)
+  }
+  if (typeof source !== 'string' && !types.isAnyArrayBuffer(source) && !ArrayBuffer.isView(source)) {
+    throw new TypeError(`${prefix(name)}: load() must return a string, ArrayBuffer or typed array source for '${url}'`)
+  }
+  return { source, format: format ?? resolvedFormat }
+}
+
+/**
+ * Throws when a synchronous adapter returned a thenable. The thenable is
+ * observed first so a later rejection is not reported as unhandled.
+ *
+ * @param {string} name
+ * @param {unknown} value
+ * @param {string} adapter
+ * @param {string} target
+ */
+function assertNotThenable (name, value, adapter, target) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function') {
+    try {
+      value.then(noop, noop)
+    } catch {}
+    throw new TypeError(`${prefix(name)}: ${adapter}() returned a Promise for '${target}'; use createWrapperModule() for asynchronous adapters`)
+  }
+}
+
+/**
+ * Validates the options and builds the graph I/O for one call. The root is
+ * served from `options.source`, or analyzed as a builtin for a `node:` root,
+ * and builtins never reach the caller's `load`. The I/O records the effective
+ * format of every module it serves, for the manifest.
  *
  * @param {object} options
- * @param {boolean} sync
+ * @param {string} name The calling function, for error messages.
+ * @param {boolean} sync Whether the adapters must return synchronously.
  */
-function prepare (options, sync) {
+function prepare (options, name, sync) {
   if (options === null || typeof options !== 'object') {
-    throw new TypeError(`${NAME}: options must be an object`)
+    throw new TypeError(`${prefix(name)}: options must be an object`)
   }
   const { url, source, specifier } = options
   let { resolve, load } = options
-  if (options.sync !== undefined && typeof options.sync !== 'boolean') {
-    throw new TypeError(`${NAME}: options.sync must be a boolean`)
-  }
   if (typeof url !== 'string' || !isAbsoluteUrl(url)) {
-    throw new TypeError(`${NAME}: options.url must be an absolute URL string`)
+    throw new TypeError(`${prefix(name)}: options.url must be an absolute URL string`)
   }
-  const builtin = url.startsWith('node:')
-  if (builtin) {
+  let root = { source, format: 'module' }
+  if (url.startsWith('node:')) {
     if (!isBuiltinUrl(url)) {
-      throw new TypeError(`${NAME}: options.url '${url}' is not a Node.js builtin`)
+      throw new TypeError(`${prefix(name)}: options.url '${url}' is not a Node.js builtin`)
     }
     if (source !== undefined) {
-      throw new TypeError(`${NAME}: options.source must be omitted for the builtin '${url}'`)
+      throw new TypeError(`${prefix(name)}: options.source must be omitted for the builtin '${url}'`)
     }
+    root = BUILTIN
     resolve ??= unusedAdapter
     load ??= unusedAdapter
   } else if (typeof source !== 'string') {
-    throw new TypeError(`${NAME}: options.source must be a string of ESM JavaScript`)
+    throw new TypeError(`${prefix(name)}: options.source must be a string of ESM JavaScript`)
   }
   if (typeof specifier !== 'string') {
-    throw new TypeError(`${NAME}: options.specifier must be a string`)
+    throw new TypeError(`${prefix(name)}: options.specifier must be a string`)
   }
-  for (const [name, value] of [['resolve', resolve], ['load', load]]) {
-    if (typeof value !== 'function') {
-      throw new TypeError(`${NAME}: options.${name} must be a function`)
-    }
+  if (typeof resolve !== 'function') {
+    throw new TypeError(`${prefix(name)}: options.resolve must be a function`)
+  }
+  if (typeof load !== 'function') {
+    throw new TypeError(`${prefix(name)}: options.load must be a function`)
   }
 
-  /** @type {Set<string>} */
-  const watchFiles = new Set()
-  // A format from load overrides one from resolve, regardless of call order.
-  // The first report per URL is kept, matching the per-call analysis cache.
-  /** @type {Map<string, string>} */
-  const loadedFormats = new Map()
-  /** @type {Map<string, string>} */
-  const resolvedFormats = new Map()
+  // The first effective format served per URL, reported in the manifest.
+  /** @type {Map<string, string | undefined>} */
+  const formats = new Map([[url, root.format]])
 
   /**
-   * @param {unknown} files
-   * @param {string} adapter
+   * Serves the root and builtins; anything else comes from the caller.
+   *
    * @param {string} target
+   * @returns {object | undefined}
    */
-  function addWatchFiles (files, adapter, target) {
-    if (files === undefined) return
-    if (files === null || typeof files !== 'object' || typeof files[Symbol.iterator] !== 'function') {
-      throw new TypeError(`${NAME}: ${adapter}() must return watchFiles as an iterable of absolute URL strings for '${target}'`)
+  function serveKnown (target) {
+    if (target === url) return root
+    if (target.startsWith('node:')) {
+      formats.set(target, 'builtin')
+      return BUILTIN
     }
-    for (const file of files) {
-      if (typeof file !== 'string' || !isAbsoluteUrl(file)) {
-        throw new TypeError(`${NAME}: ${adapter}() returned a watchFiles entry that is not an absolute URL string for '${target}'`)
-      }
-      watchFiles.add(file)
-    }
-  }
-
-  /**
-   * @param {unknown} result
-   * @param {string} target
-   */
-  function recordResolved (result, target) {
-    const resolved = checkResolved(result, target)
-    addWatchFiles(resolved.watchFiles, 'resolve', target)
-    if (resolved.format != null && !resolvedFormats.has(resolved.url)) {
-      resolvedFormats.set(resolved.url, resolved.format)
-    }
-    return resolved
   }
 
   /**
@@ -224,130 +206,106 @@ function prepare (options, sync) {
    * @param {string | undefined} resolvedFormat
    */
   function recordLoaded (result, target, resolvedFormat) {
-    const loaded = checkLoaded(result, target, resolvedFormat)
-    addWatchFiles(result.watchFiles, 'load', target)
-    if (loaded.format != null && !loadedFormats.has(target)) loadedFormats.set(target, loaded.format)
+    const loaded = checkLoaded(name, result, target, resolvedFormat)
+    if (!formats.has(target)) formats.set(target, loaded.format)
     return loaded
   }
 
-  /** @param {string} target */
-  function recordAnalyzed (target) {
-    if (target.startsWith('file:')) watchFiles.add(target)
+  /** @param {{ parentURL: string, kind?: 'import' | 'require' }} context */
+  function resolveContext (context) {
+    return { parentURL: context.parentURL, kind: context.kind ?? 'import' }
   }
 
-  /**
-   * @param {string} target
-   * @param {{ format?: string }} context
-   */
-  function isBuiltin (target, context) {
-    return target.startsWith('node:') || context.format === 'builtin'
-  }
-
-  const root = builtin ? { source: null, format: 'builtin' } : { source, format: 'module' }
-  loadedFormats.set(url, root.format)
   let io
   if (sync) {
     io = {
       resolve (target, context) {
-        const result = resolve(target, { parentURL: context.parentURL, kind: context.kind ?? 'import' })
-        assertNotThenable(result, 'resolve', target)
-        return recordResolved(result, target)
+        const result = resolve(target, resolveContext(context))
+        assertNotThenable(name, result, 'resolve', target)
+        return checkResolved(name, result, target)
       },
       load (target, context) {
-        recordAnalyzed(target)
-        if (target === url) return root
-        if (isBuiltin(target, context)) return { source: null, format: 'builtin' }
+        const known = serveKnown(target)
+        if (known !== undefined) return known
         const result = load(target, { format: context.format })
-        assertNotThenable(result, 'load', target)
+        assertNotThenable(name, result, 'load', target)
         return recordLoaded(result, target, context.format)
       }
     }
   } else {
     io = {
       async resolve (target, context) {
-        return recordResolved(await resolve(target, { parentURL: context.parentURL, kind: context.kind ?? 'import' }), target)
+        return checkResolved(name, await resolve(target, resolveContext(context)), target)
       },
       async load (target, context) {
-        recordAnalyzed(target)
-        if (target === url) return root
-        if (isBuiltin(target, context)) return { source: null, format: 'builtin' }
+        const known = serveKnown(target)
+        if (known !== undefined) return known
         return recordLoaded(await load(target, { format: context.format }), target, context.format)
       }
     }
   }
 
-  return {
-    io,
-    analysis: processModule({ srcUrl: url, context: { format: root.format }, state: createAnalysisState() }),
-    render ({ bindings, format }) {
-      const imports = [{
-        specifier: RUNTIME_SPECIFIER,
-        kind: 'runtime',
-        target: { url: runtimeUrl, format: 'commonjs' },
-        external: false
-      }]
-      /** @type {Map<string, string>} */
-      const specifiers = new Map()
+  const analysis = processModule({ srcUrl: url, context: { format: root.format }, state: createAnalysisState() })
+  return { url, specifier, formats, io, analysis }
+}
 
-      /** @param {string} target */
-      function mapModule (target) {
-        let placeholder = specifiers.get(target)
-        if (placeholder === undefined) {
-          placeholder = `${MODULE_SPECIFIER_PREFIX}${specifiers.size}__.js`
-          specifiers.set(target, placeholder)
-          const targetFormat = loadedFormats.get(target) ?? resolvedFormats.get(target) ??
-            (target.startsWith('node:') ? 'builtin' : undefined)
-          imports.push({
-            specifier: placeholder,
-            kind: 'module',
-            target: targetFormat === undefined ? { url: target } : { url: target, format: targetFormat },
-            external: isExternal(target, targetFormat)
-          })
-        }
-        return placeholder
-      }
+/**
+ * Builds the facade and its manifest from the analyzed bindings.
+ *
+ * @param {{ url: string, specifier: string, formats: Map<string, string | undefined> }} call
+ * @param {import('./lib/wrapper.mjs').ProcessResult} result
+ */
+function render ({ url, specifier, formats }, { bindings, format }) {
+  const imports = [{ specifier: RUNTIME_SPECIFIER, kind: 'runtime', url: runtimeUrl, format: 'commonjs' }]
+  /** @type {Map<string, string>} */
+  const placeholders = new Map()
 
-      // The wrapped module is always the first module placeholder.
-      mapModule(url)
-      const code = buildWrapperSource(url, bindings, specifier, format, RUNTIME_SPECIFIER, mapModule)
-      return { code, imports, watchFiles: Array.from(watchFiles), sideEffects: true }
+  /** @param {string} target */
+  function mapModule (target) {
+    let placeholder = placeholders.get(target)
+    if (placeholder === undefined) {
+      placeholder = `${MODULE_SPECIFIER_PREFIX}${placeholders.size}__.js`
+      placeholders.set(target, placeholder)
+      const entry = { specifier: placeholder, kind: target === url ? 'original' : 'module', url: target }
+      const targetFormat = formats.get(target)
+      if (targetFormat !== undefined) entry.format = targetFormat
+      imports.push(entry)
     }
+    return placeholder
   }
-}
 
-/** @param {object} options */
-function createWrapperModuleSync (options) {
-  const { io, analysis, render } = prepare(options, true)
-  return render(driveSync(analysis, io))
-}
-
-/** @param {object} options */
-async function createWrapperModuleAsync (options) {
-  const { io, analysis, render } = prepare(options, false)
-  return render(await driveAsync(analysis, io))
+  // Number the original first, before the defining modules of star bindings.
+  mapModule(url)
+  const code = buildWrapperSource(url, bindings, specifier, format, RUNTIME_SPECIFIER, mapModule)
+  return { code, imports }
 }
 
 /**
  * EXPERIMENTAL: this API may change in minor versions.
  *
- * Generates an IITM-style ESM facade for a caller-selected ESM module, or for a
+ * Generates an IITM ESM facade for a caller-selected ESM module, or for a
  * Node.js builtin given as a `node:` URL, without installing IITM's loader
- * hooks. The facade imports the original module and IITM's registration
- * runtime through relative placeholder specifiers, re-exports its bindings, and
- * registers the module with `Hook`/`addHook` under the canonical `url`.
- *
- * Returns `{ code, imports, watchFiles, sideEffects: true }`, where `imports`
- * maps each placeholder to its target and `watchFiles` lists the analyzed
- * `file:` URLs and the adapters' watch files. The result is a Promise unless
- * `sync` is `true`, which requires `resolve` and `load` to return
- * synchronously. The mode is chosen only by `sync`.
+ * hooks. Adapters may return values or Promises. Invalid options and adapter
+ * failures reject the returned Promise.
  *
  * @param {object} options See `wrapper.d.mts`.
- * @returns {object | Promise<object>}
+ * @returns {Promise<{ code: string, imports: object[] }>}
  */
-export function createWrapperModule (options) {
-  if (options !== null && typeof options === 'object' && options.sync === true) {
-    return createWrapperModuleSync(options)
-  }
-  return createWrapperModuleAsync(options)
+export async function createWrapperModule (options) {
+  const call = prepare(options, 'createWrapperModule', false)
+  return render(call, await driveAsync(call.analysis, call.io))
+}
+
+/**
+ * EXPERIMENTAL: this API may change in minor versions.
+ *
+ * Synchronous {@link createWrapperModule}, for synchronous hooks such as
+ * `module.registerHooks()`. `resolve` and `load` must return synchronously.
+ *
+ * @param {object} options See `wrapper.d.mts`.
+ * @returns {{ code: string, imports: object[] }}
+ */
+export function createWrapperModuleSync (options) {
+  const call = prepare(options, 'createWrapperModuleSync', true)
+  return render(call, driveSync(call.analysis, call.io))
 }

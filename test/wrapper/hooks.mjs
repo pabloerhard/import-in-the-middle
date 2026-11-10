@@ -1,9 +1,10 @@
 // Executes generated facades without IITM's loader: the original package lives
 // in a temp node_modules, and the facade is written to a different file with
 // its `imports` manifest next to it. Each placeholder is resolved through the
-// manifest to the original file and to the same `lib/register.js` instance
-// `Hook`/`addHook` use: by a `module.register` resolve hook where available,
-// otherwise by rewriting the placeholders to their targets.
+// manifest to its `url`: the original file, the defining modules and the same
+// `lib/register.js` instance `Hook`/`addHook` use. That is done by a
+// `module.register` resolve hook where available, otherwise by rewriting the
+// placeholders to their URLs.
 
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -14,7 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { init, parse } from 'es-module-lexer'
 
 import { Hook, addHook, removeHook } from '../../index.js'
-import { createWrapperModule } from '../../wrapper.mjs'
+import { createWrapperModule, createWrapperModuleSync } from '../../wrapper.mjs'
 
 await init
 
@@ -24,12 +25,12 @@ if (useLoader) {
 }
 
 /**
- * Replaces each placeholder of `code` with its manifest target.
+ * Replaces each placeholder of `code` with its manifest URL.
  *
- * @param {{ code: string, imports: { specifier: string, target: { url: string } }[] }} result
+ * @param {{ code: string, imports: { specifier: string, url: string }[] }} result
  */
 function link ({ code, imports }) {
-  const targets = new Map(imports.map(({ specifier, target }) => [specifier, target.url]))
+  const targets = new Map(imports.map(({ specifier, url }) => [specifier, url]))
   let linked = ''
   let last = 0
   for (const { specifier, start, end } of parse(code)[0]) {
@@ -71,9 +72,9 @@ function options (url, specifier) {
     url,
     source: readFileSync(fileURLToPath(url), 'utf8'),
     specifier,
-    resolve (s) {
-      // Relative `export *` targets arrive already joined.
-      return { url: s, format: 'module' }
+    resolve (s, { parentURL }) {
+      // Relative `export *` specifiers arrive as written.
+      return { url: new URL(s, parentURL).href, format: 'module' }
     },
     load (u) {
       return { source: readFileSync(fileURLToPath(u), 'utf8'), format: 'module' }
@@ -101,13 +102,12 @@ try {
   const url = pathToFileURL(join(pkgDir, 'index.js')).href
 
   const result = await createWrapperModule(options(url, 'wrap-pkg'))
-  assert.deepEqual(createWrapperModule({ ...options(url, 'wrap-pkg'), sync: true }), result,
+  assert.deepEqual(createWrapperModuleSync(options(url, 'wrap-pkg')), result,
     'sync generation should produce an identical result')
-  assert.deepEqual(result.imports.map(({ target }) => target.url), [
+  assert.deepEqual(result.imports.map((entry) => entry.url), [
     new URL('../../lib/register.js', import.meta.url).href,
     url
   ])
-  assert.deepEqual(result.watchFiles, [url, pathToFileURL(join(pkgDir, 'more.js')).href])
 
   const calls = []
   const hook = new Hook(['wrap-pkg'], (exported, name, baseDir, format) => {
@@ -167,7 +167,7 @@ try {
   const sameResult = await createWrapperModule(options(sameUrl, 'same-pkg'))
   const dUrl = pathToFileURL(join(sameDir, 'd.js')).href
   assert.ok(sameResult.code.includes('import * as __ns0 from "./__iitm_module_1__.js"'))
-  assert.deepEqual(sameResult.imports[2].target, { url: dUrl, format: 'module' })
+  assert.deepEqual(sameResult.imports[2], { specifier: './__iitm_module_1__.js', kind: 'module', url: dUrl, format: 'module' })
   const sameFacade = await importFacade(join(dir, 'same-facade.mjs'), sameResult)
   assert.equal(sameFacade.same(), 'd')
 
@@ -185,8 +185,8 @@ try {
     builtinCalls.push({ name, baseDir, format })
     exported.once = () => 'hooked once'
   })
-  const builtinResult = createWrapperModule({ url: 'node:events', specifier: 'events', sync: true })
-  assert.equal(builtinResult.imports[1].external, true)
+  const builtinResult = createWrapperModuleSync({ url: 'node:events', specifier: 'events' })
+  assert.deepEqual(builtinResult.imports[1], { specifier: './__iitm_module_0__.js', kind: 'original', url: 'node:events', format: 'builtin' })
   const builtinFacade = await importFacade(join(dir, 'events-facade.mjs'), builtinResult)
   assert.deepEqual(builtinCalls, [{ name: 'events', baseDir: undefined, format: 'builtin' }])
   assert.equal(builtinFacade.once(), 'hooked once')

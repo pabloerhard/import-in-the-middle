@@ -1,8 +1,9 @@
-// Error behaviour of `createWrapperModule`: invalid options, adapters that
-// break the sync contract, adapter errors and malformed adapter results.
+// Error behaviour of `createWrapperModule` and `createWrapperModuleSync`:
+// invalid options, adapters that break the sync contract, adapter errors and
+// malformed adapter results.
 import assert from 'node:assert/strict'
 
-import { createWrapperModule } from '../../wrapper.mjs'
+import { createWrapperModule, createWrapperModuleSync } from '../../wrapper.mjs'
 
 const rootUrl = 'file:///virtual/errors/root.mjs'
 const depUrl = 'file:///virtual/errors/dep.mjs'
@@ -38,7 +39,7 @@ async function assertRejectsOnly (fn, expected, name) {
   await assert.rejects(result, expected, name)
 }
 
-// Invalid options. The default (async) mode reports every one of them as a
+// Invalid options. `createWrapperModule` reports every one of them as a
 // rejection, never as a synchronous throw.
 const objectCases = {
   'missing url': { ...base, url: undefined },
@@ -56,20 +57,20 @@ const objectCases = {
 const asyncCases = {
   null: null,
   string: 'file:///virtual/errors/root.mjs',
-  'non-boolean sync': { ...base, sync: 'yes' },
   ...objectCases
 }
 for (const [name, options] of Object.entries(asyncCases)) {
   await assertRejectsOnly(() => createWrapperModule(options), TypeError, name)
 }
 
-// With `sync: true` the same invalid options throw synchronously.
-for (const [name, options] of Object.entries(objectCases)) {
-  assert.throws(() => createWrapperModule({ ...options, sync: true }), TypeError, name)
+// `createWrapperModuleSync` throws the same invalid options synchronously.
+for (const [name, options] of Object.entries(asyncCases)) {
+  assert.throws(() => createWrapperModuleSync(options), TypeError, name)
 }
 
-// In sync mode an adapter returning a Promise is a synchronous TypeError. The
-// Promise is observed, so its later rejection is not reported as unhandled.
+// In `createWrapperModuleSync` an adapter returning a Promise is a synchronous
+// TypeError. The Promise is observed, so its later rejection is not reported
+// as unhandled.
 const unhandled = []
 const onUnhandled = (reason) => unhandled.push(reason)
 process.on('unhandledRejection', onUnhandled)
@@ -79,24 +80,37 @@ function rejectLater () {
 }
 
 assert.throws(
-  () => createWrapperModule({ ...base, sync: true, resolve: rejectLater }),
-  (err) => err instanceof TypeError && /resolve\(\)/.test(err.message) && /sync/.test(err.message)
+  () => createWrapperModuleSync({ ...base, resolve: rejectLater }),
+  (err) => err instanceof TypeError && /resolve\(\)/.test(err.message) && /createWrapperModule\(\)/.test(err.message)
 )
 assert.throws(
-  () => createWrapperModule({ ...base, sync: true, load: rejectLater }),
-  (err) => err instanceof TypeError && /load\(\)/.test(err.message) && /sync/.test(err.message)
+  () => createWrapperModuleSync({ ...base, load: rejectLater }),
+  (err) => err instanceof TypeError && /load\(\)/.test(err.message) && /createWrapperModule\(\)/.test(err.message)
 )
+
+// Any thenable counts, even one whose `then` throws while being observed.
+const thenables = {
+  'plain thenable': () => ({ then (resolve) { resolve({ url: 'file:///virtual/errors/dep.mjs' }) } }),
+  'throwing thenable': () => ({ then () { throw new Error('then threw') } })
+}
+for (const [name, resolve] of Object.entries(thenables)) {
+  assert.throws(
+    () => createWrapperModuleSync({ ...base, resolve }),
+    (err) => err instanceof TypeError && /resolve\(\) returned a Promise/.test(err.message),
+    name
+  )
+}
 
 await new Promise((resolve) => setTimeout(resolve, 50))
 process.off('unhandledRejection', onUnhandled)
 assert.deepEqual(unhandled, [])
 
-// An adapter's own error propagates unchanged: thrown in sync mode, rejected
-// in async mode.
+// An adapter's own error propagates unchanged: thrown by
+// `createWrapperModuleSync`, rejected by `createWrapperModule`.
 for (const adapter of ['resolve', 'load']) {
   const error = new Error(`${adapter} failed`)
   assert.throws(
-    () => createWrapperModule({ ...base, sync: true, [adapter] () { throw error } }),
+    () => createWrapperModuleSync({ ...base, [adapter] () { throw error } }),
     (err) => err === error
   )
   await assert.rejects(
@@ -105,49 +119,41 @@ for (const adapter of ['resolve', 'load']) {
   )
 }
 
-// Malformed adapter results are TypeErrors in both modes.
+// Malformed adapter results are TypeErrors in both functions.
 const malformed = {
   'resolve returns null': { resolve: () => null },
   'resolve returns no url': { resolve: () => ({}) },
   'resolve returns a relative url': { resolve: () => ({ url: './dep.mjs' }), message: /absolute URL/ },
   'resolve returns a bare builtin name': { resolve: () => ({ url: 'events', format: 'builtin' }), message: /absolute URL/ },
+  'resolve returns builtin for a file url': {
+    resolve: () => ({ url: depUrl, format: 'builtin' }),
+    message: /resolve builtins to a node: URL/
+  },
+  'resolve returns an unknown builtin': {
+    resolve: () => ({ url: 'node:no-such-builtin' }),
+    message: /not a Node.js builtin/
+  },
+  'resolve returns a non-builtin format for a builtin': {
+    resolve: () => ({ url: 'node:events', format: 'module' }),
+    message: /for the builtin/
+  },
   'load returns null': { load: () => null },
   'load returns no source': { load: () => ({ source: null, format: 'module' }), message: /returned no source/ },
   'load returns a numeric source': { load: () => ({ source: 42 }), message: /string, ArrayBuffer or typed array/ },
   'load returns an object source': { load: () => ({ source: {} }), message: /string, ArrayBuffer or typed array/ },
   'load returns builtin for a non-builtin': {
     load: () => ({ source: null, format: 'builtin' }),
-    message: /not a builtin/
+    message: /resolve builtins to a node: URL/
   },
   'resolve returns a numeric format': { resolve: () => ({ url: depUrl, format: 1 }), message: /string format/ },
   'load returns a numeric format': {
     load: () => ({ source: 'export const a = 1\n', format: 1 }),
     message: /string format/
-  },
-  'resolve returns string watchFiles': {
-    resolve: () => ({ url: depUrl, watchFiles: 'file:///virtual/errors/package.json' }),
-    message: /resolve\(\).*watchFiles as an iterable/
-  },
-  'resolve returns non-iterable watchFiles': {
-    resolve: () => ({ url: depUrl, watchFiles: {} }),
-    message: /resolve\(\).*watchFiles as an iterable/
-  },
-  'resolve returns a relative watch file': {
-    resolve: () => ({ url: depUrl, watchFiles: ['./package.json'] }),
-    message: /resolve\(\).*not an absolute URL/
-  },
-  'load returns null watchFiles': {
-    load: () => ({ source: 'export const a = 1\n', watchFiles: null }),
-    message: /load\(\).*watchFiles as an iterable/
-  },
-  'load returns a numeric watch file': {
-    load: () => ({ source: 'export const a = 1\n', watchFiles: [1] }),
-    message: /load\(\).*not an absolute URL/
   }
 }
 for (const [name, { message = /./, ...adapters }] of Object.entries(malformed)) {
   const matches = (err) => err instanceof TypeError && message.test(err.message)
-  assert.throws(() => createWrapperModule({ ...base, ...adapters, sync: true }), matches, name)
+  assert.throws(() => createWrapperModuleSync({ ...base, ...adapters }), matches, name)
   await assert.rejects(createWrapperModule({ ...base, ...adapters }), matches, name)
 }
 
@@ -170,4 +176,4 @@ const isNestedError = (err) =>
   err.cause instanceof TypeError &&
   /returned no source/.test(err.cause.message)
 await assert.rejects(createWrapperModule(nested), isNestedError)
-assert.throws(() => createWrapperModule({ ...nested, sync: true }), isNestedError)
+assert.throws(() => createWrapperModuleSync(nested), isNestedError)

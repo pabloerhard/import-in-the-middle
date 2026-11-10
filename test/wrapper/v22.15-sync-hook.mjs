@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { supportsSyncHooks } from '../../supports-sync-hooks.mjs'
 import { Hook } from '../../index.js'
-import { createWrapperModule } from '../../wrapper.mjs'
+import { createWrapperModuleSync } from '../../wrapper.mjs'
 
 if (!supportsSyncHooks()) {
   console.log(`Skipping ${process.env.IITM_TEST_FILE || import.meta.url}: synchronous hooks unsupported on this Node.js`)
@@ -58,8 +58,8 @@ try {
     'index.js': 'await Promise.resolve()\nexport const x = 1\n'
   })
 
-  // The facade is served at the module's own URL, so its module placeholders
-  // resolve to this suffix, which the hooks below serve unwrapped.
+  // The facade is served at the module's own URL, so its original placeholder
+  // resolves to this suffix, which the hooks below serve unwrapped.
   const ORIGINAL = '?iitm-original'
   const specifiers = new Map()
   // Facade URL -> its placeholder manifest.
@@ -71,9 +71,8 @@ try {
     resolve (specifier, context, nextResolve) {
       const entry = manifests.get(context.parentURL)?.find((entry) => entry.specifier === specifier)
       if (entry !== undefined) {
-        const { kind, external, target } = entry
-        const url = kind === 'module' && !external ? target.url + ORIGINAL : target.url
-        return { url, format: target.format, shortCircuit: true }
+        const url = entry.kind === 'original' ? entry.url + ORIGINAL : entry.url
+        return { url, format: entry.format, shortCircuit: true }
       }
       nextResolveForGraph = nextResolve
       const result = nextResolve(specifier, context)
@@ -91,12 +90,15 @@ try {
       // Classify by the loaded format, not by the require/import conditions.
       if (!/\/node_modules\/sync-(pkg|tla)\//.test(url) || result.format !== 'module') return result
 
-      const { code, imports, watchFiles, sideEffects } = createWrapperModule({
+      const { code, imports } = createWrapperModuleSync({
         url,
         source: sourceOf(result, url),
         specifier: specifiers.get(url) ?? url,
-        sync: true,
         resolve (s, { parentURL, kind }) {
+          // Specifiers arrive as written. A `nextResolve` captured from a
+          // `require` resolves against its own parent module, not `parentURL`,
+          // so relative ones are joined here.
+          if (s.startsWith('.') || s.startsWith('/')) return { url: new URL(s, parentURL).href }
           if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return { url: s }
           const conditions = kind === 'require' ? ['node', 'require'] : ['node', 'import']
           return nextResolveForGraph(s, { parentURL, conditions, importAttributes: {} })
@@ -107,8 +109,8 @@ try {
         }
       })
       assert.equal(typeof code, 'string')
-      assert.equal(sideEffects, true)
-      assert.equal(watchFiles[0], url)
+      assert.equal(imports[1].kind, 'original')
+      assert.equal(imports[1].url, url)
       manifests.set(url, imports)
       wraps.push(url)
       return { format: 'module', source: code, shortCircuit: true }
