@@ -1,4 +1,6 @@
-// EXPERIMENTAL: this entry point may change in minor versions.
+// EXPERIMENTAL: not covered by semantic versioning. This API may change or
+// be removed in any release, including patch releases, without a
+// deprecation period.
 //
 // Generates the same ESM facade IITM's loaders generate, for a module the
 // caller selected, using the caller's source and resolve/load adapters, plus a
@@ -26,9 +28,9 @@ function prefix (name) {
   return `'import-in-the-middle' ${name}()`
 }
 
-// A builtin root has no module graph, so its adapters are never called.
-function unusedAdapter () {
-  throw new Error("'import-in-the-middle': adapter called for a builtin root")
+/** @param {unknown} source */
+function isSource (source) {
+  return typeof source === 'string' || types.isAnyArrayBuffer(source) || ArrayBuffer.isView(source)
 }
 
 /** @param {string} url A `node:` URL. */
@@ -115,7 +117,7 @@ function checkLoaded (name, result, url, resolvedFormat) {
   if (source == null) {
     throw new TypeError(`${prefix(name)}: load() returned no source for '${url}'`)
   }
-  if (typeof source !== 'string' && !types.isAnyArrayBuffer(source) && !ArrayBuffer.isView(source)) {
+  if (!isSource(source)) {
     throw new TypeError(`${prefix(name)}: load() must return a string, ArrayBuffer or typed array source for '${url}'`)
   }
   return { source, format: format ?? resolvedFormat }
@@ -142,8 +144,9 @@ function assertNotThenable (name, value, adapter, target) {
 /**
  * Validates the options and builds the graph I/O for one call. The root is
  * served from `options.source`, or analyzed as a builtin for a `node:` root,
- * and builtins never reach the caller's `load`. The I/O records the effective
- * format of every module it serves, for the manifest.
+ * and builtins never reach the caller's `load`. Adapters are required only
+ * when analysis needs them. The I/O records the effective format of every
+ * module it serves, for the manifest.
  *
  * @param {object} options
  * @param {string} name The calling function, for error messages.
@@ -153,8 +156,7 @@ function prepare (options, name, sync) {
   if (options === null || typeof options !== 'object') {
     throw new TypeError(`${prefix(name)}: options must be an object`)
   }
-  const { url, source, specifier } = options
-  let { resolve, load } = options
+  const { url, source, specifier, resolve, load } = options
   if (typeof url !== 'string' || !isAbsoluteUrl(url)) {
     throw new TypeError(`${prefix(name)}: options.url must be an absolute URL string`)
   }
@@ -167,18 +169,16 @@ function prepare (options, name, sync) {
       throw new TypeError(`${prefix(name)}: options.source must be omitted for the builtin '${url}'`)
     }
     root = BUILTIN
-    resolve ??= unusedAdapter
-    load ??= unusedAdapter
-  } else if (typeof source !== 'string') {
-    throw new TypeError(`${prefix(name)}: options.source must be a string of ESM JavaScript`)
+  } else if (!isSource(source)) {
+    throw new TypeError(`${prefix(name)}: options.source must be a string, ArrayBuffer or typed array of ESM JavaScript`)
   }
   if (typeof specifier !== 'string') {
     throw new TypeError(`${prefix(name)}: options.specifier must be a string`)
   }
-  if (typeof resolve !== 'function') {
+  if (resolve !== undefined && typeof resolve !== 'function') {
     throw new TypeError(`${prefix(name)}: options.resolve must be a function`)
   }
-  if (typeof load !== 'function') {
+  if (load !== undefined && typeof load !== 'function') {
     throw new TypeError(`${prefix(name)}: options.load must be a function`)
   }
 
@@ -211,23 +211,42 @@ function prepare (options, name, sync) {
     return loaded
   }
 
-  /** @param {{ parentURL: string, kind?: 'import' | 'require' }} context */
-  function resolveContext (context) {
-    return { parentURL: context.parentURL, kind: context.kind ?? 'import' }
+  /**
+   * @param {string} target
+   * @param {{ parentURL: string, kind?: 'import' | 'require' }} context
+   */
+  function resolveWithAdapter (target, context) {
+    if (resolve === undefined) {
+      throw new TypeError(`${prefix(name)}: resolve() is required to analyze '${target}' re-exported by '${context.parentURL}'`)
+    }
+    return resolve(target, { parentURL: context.parentURL, kind: context.kind ?? 'import' })
+  }
+
+  /**
+   * @param {string} target
+   * @param {{ format?: string }} context
+   */
+  function loadWithAdapter (target, context) {
+    // Without `load`, analysis stops at the first module it needs, which only
+    // the root's own source can have re-exported.
+    if (load === undefined) {
+      throw new TypeError(`${prefix(name)}: load() is required to analyze '${target}' re-exported by '${url}'`)
+    }
+    return load(target, { format: context.format })
   }
 
   let io
   if (sync) {
     io = {
       resolve (target, context) {
-        const result = resolve(target, resolveContext(context))
+        const result = resolveWithAdapter(target, context)
         assertNotThenable(name, result, 'resolve', target)
         return checkResolved(name, result, target)
       },
       load (target, context) {
         const known = serveKnown(target)
         if (known !== undefined) return known
-        const result = load(target, { format: context.format })
+        const result = loadWithAdapter(target, context)
         assertNotThenable(name, result, 'load', target)
         return recordLoaded(result, target, context.format)
       }
@@ -235,12 +254,12 @@ function prepare (options, name, sync) {
   } else {
     io = {
       async resolve (target, context) {
-        return checkResolved(name, await resolve(target, resolveContext(context)), target)
+        return checkResolved(name, await resolveWithAdapter(target, context), target)
       },
       async load (target, context) {
         const known = serveKnown(target)
         if (known !== undefined) return known
-        return recordLoaded(await load(target, { format: context.format }), target, context.format)
+        return recordLoaded(await loadWithAdapter(target, context), target, context.format)
       }
     }
   }
@@ -281,12 +300,15 @@ function render ({ url, specifier, formats }, { bindings, format }) {
 }
 
 /**
- * EXPERIMENTAL: this API may change in minor versions.
+ * EXPERIMENTAL: not covered by semantic versioning. This API may change or
+ * be removed in any release, including patch releases, without a
+ * deprecation period.
  *
  * Generates an IITM ESM facade for a caller-selected ESM module, or for a
  * Node.js builtin given as a `node:` URL, without installing IITM's loader
- * hooks. Adapters may return values or Promises. Invalid options and adapter
- * failures reject the returned Promise.
+ * hooks. Adapters are required only when analysis needs them and may return
+ * values or Promises. Invalid options and adapter failures reject the returned
+ * Promise.
  *
  * @param {object} options See `wrapper.d.mts`.
  * @returns {Promise<{ code: string, imports: object[] }>}
@@ -297,7 +319,9 @@ export async function createWrapperModule (options) {
 }
 
 /**
- * EXPERIMENTAL: this API may change in minor versions.
+ * EXPERIMENTAL: not covered by semantic versioning. This API may change or
+ * be removed in any release, including patch releases, without a
+ * deprecation period.
  *
  * Synchronous {@link createWrapperModule}, for synchronous hooks such as
  * `module.registerHooks()`. `resolve` and `load` must return synchronously.

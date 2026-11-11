@@ -263,7 +263,12 @@ On Node.js versions where type stripping is not enabled by default, run with
 
 ## Generating facades without the loader (experimental)
 
-> **Note:** This API is experimental and may change in minor versions.
+> [!WARNING]
+> **This API is experimental and is not covered by semantic versioning.** Its
+> options, result shape and behavior can change, or the API can be removed, in
+> any release, including patch releases, without a deprecation period. If you
+> depend on it, pin an exact `import-in-the-middle` version and review the
+> changelog before upgrading.
 
 `import-in-the-middle/wrapper.mjs` exports `createWrapperModule` and
 `createWrapperModuleSync`, which generate the same ESM facade the loader
@@ -280,7 +285,7 @@ import { createWrapperModule, createWrapperModuleSync } from 'import-in-the-midd
 // Build time: adapters may return values or Promises.
 const { code, imports } = await createWrapperModule({
   url, // canonical URL, e.g. 'file:///app/node_modules/pkg/index.js'
-  source, // that module's ESM JavaScript source
+  source, // that module's ESM JavaScript, as text or bytes
   specifier, // e.g. 'pkg'
   resolve, // (specifier, { parentURL, kind }) => { url, format? }
   load // (url, { format }) => { source, format? }
@@ -288,6 +293,9 @@ const { code, imports } = await createWrapperModule({
 
 // Inside a synchronous hook: adapters must return synchronously.
 const wrapper = createWrapperModuleSync({ url, source, specifier, resolve, load })
+
+// Direct exports need no graph adapters.
+const leaf = createWrapperModuleSync({ url, specifier, source: 'export const value = 42' })
 
 // A builtin: no source, and no adapters are needed.
 const http = createWrapperModuleSync({ url: 'node:http', specifier: 'http' })
@@ -300,12 +308,13 @@ itself, and `resolve` and `load` must return synchronously. A Promise returned
 by either throws a `TypeError`, and IITM observes that Promise so it is not
 reported as an unhandled rejection.
 
-**Root module.** `source` must be a string containing ESM JavaScript. Byte
-decoding, TypeScript/JSX transpilation and deciding that the module is ESM are
-the caller's job. IITM does not infer the root format, and it never reloads the
-root: wherever `resolve` returns exactly `url`, `source` is used, so `url` must
-be the same canonical string `resolve` produces. An empty string is a valid
-module.
+**Root module.** `source` must be ESM JavaScript, as a string, `ArrayBuffer` or
+typed array (including `Buffer`); byte input is decoded as UTF-8, just like
+dependency source from `load`. TypeScript/JSX transpilation and deciding that
+the module is ESM are the caller's job. IITM does not infer the root format, and
+it never reloads the root: wherever `resolve` returns exactly `url`, `source` is
+used, so `url` must be the same canonical string `resolve` produces. An empty
+string or empty byte source is a valid module.
 
 **Builtin root.** A Node.js builtin is wrapped by passing its `node:` URL
 (`node:fs`, not `fs`) and omitting `source`. Its export names come from the
@@ -316,7 +325,21 @@ format `builtin`, and registers it with that format, as the loader does. A
 `TypeError`.
 
 **Graph adapters.** `resolve` and `load` are only used to discover exports
-re-exported from other modules:
+re-exported from other modules, so they are optional until analysis needs them:
+
+* With only direct exports, named re-exports or namespace re-exports
+  (`export * as name from`), neither adapter is needed. Those forms already
+  declare their export names.
+* A bare `export * from` requires `resolve`. Its target requires `load` unless
+  it is a builtin or the root, whose source is already available.
+* CommonJS re-export chains discovered in dependencies use the same adapters.
+
+A missing adapter throws or rejects with a `TypeError` naming the needed
+operation, its target and the module that re-exports it. No exports are
+silently skipped. An adapter supplied with a non-function value is an error
+even when analysis would not call it.
+
+Adapter contracts:
 
 * `resolve(specifier, { parentURL, kind })` is called with `kind: 'import'` for
   `export * from` and with `kind: 'require'` for a CommonJS re-export

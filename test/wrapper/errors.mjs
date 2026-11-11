@@ -44,8 +44,10 @@ async function assertRejectsOnly (fn, expected, name) {
 const objectCases = {
   'missing url': { ...base, url: undefined },
   'relative url': { ...base, url: './a.mjs' },
-  'Buffer source': { ...base, source: Buffer.from('export const a = 1') },
   'missing source': { ...base, source: undefined },
+  'null source': { ...base, source: null },
+  'numeric source': { ...base, source: 42 },
+  'object source': { ...base, source: {} },
   'non-string specifier': { ...base, specifier: 42 },
   'non-function resolve': { ...base, resolve: {} },
   'non-function load': { ...base, load: 'load' },
@@ -66,6 +68,33 @@ for (const [name, options] of Object.entries(asyncCases)) {
 // `createWrapperModuleSync` throws the same invalid options synchronously.
 for (const [name, options] of Object.entries(asyncCases)) {
   assert.throws(() => createWrapperModuleSync(options), TypeError, name)
+}
+
+// Missing adapters are errors only when needed, naming the operation's target
+// and the module that re-exports it.
+const missingAdapters = [
+  {
+    options: { ...base, resolve: undefined },
+    message: `resolve() is required to analyze './dep.mjs' re-exported by '${rootUrl}'`
+  },
+  {
+    options: { ...base, load: undefined },
+    message: `load() is required to analyze '${depUrl}' re-exported by '${rootUrl}'`
+  }
+]
+for (const { options, message } of missingAdapters) {
+  const matches = (err) => err instanceof TypeError && err.message.includes(message)
+  assert.throws(() => createWrapperModuleSync(options), matches)
+  await assertRejectsOnly(() => createWrapperModule(options), matches)
+}
+
+// Optional does not mean invalid values are ignored, even for a leaf whose
+// export names need neither adapter.
+for (const adapter of ['resolve', 'load']) {
+  const options = { url: rootUrl, source: 'export const value = 1', specifier: './root.mjs', [adapter]: null }
+  const matches = (err) => err instanceof TypeError && err.message.includes(`options.${adapter} must be a function`)
+  assert.throws(() => createWrapperModuleSync(options), matches)
+  await assertRejectsOnly(() => createWrapperModule(options), matches)
 }
 
 // In `createWrapperModuleSync` an adapter returning a Promise is a synchronous

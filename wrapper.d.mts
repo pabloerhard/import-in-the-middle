@@ -1,5 +1,7 @@
 /**
- * EXPERIMENTAL: this API may change in minor versions.
+ * EXPERIMENTAL: not covered by semantic versioning. This API may change or
+ * be removed in any release, including patch releases, without a
+ * deprecation period.
  *
  * Context passed to {@link CreateWrapperModuleOptions.resolve}.
  */
@@ -22,8 +24,11 @@ export type WrapperResolveResult = {
    * Loader format (`module`, `commonjs`, ...), used unless `load` overrides
    * it. Only a `node:` URL may be, and always is, `builtin`.
    */
-  format?: string
+  format?: string | undefined
 }
+
+/** JavaScript source. Byte input is decoded as UTF-8. */
+export type WrapperSource = string | ArrayBuffer | ArrayBufferView
 
 /** Context passed to {@link CreateWrapperModuleOptions.load}. */
 export type WrapperLoadContext = {
@@ -33,13 +38,13 @@ export type WrapperLoadContext = {
 
 export type WrapperLoadResult = {
   /** Module source. Required; IITM never reads the filesystem for it. */
-  source: string | ArrayBuffer | ArrayBufferView
+  source: WrapperSource
   /**
    * Loader format, overriding `resolve` when provided. Only when neither
    * adapter supplies a format is ESM syntax treated as ESM and anything else
    * as CommonJS. Builtins never reach `load`, so `builtin` is rejected.
    */
-  format?: string
+  format?: string | undefined
 }
 
 /**
@@ -88,47 +93,54 @@ export type WrapperModule = {
 }
 
 type CreateWrapperModuleBaseOptions = {
+  /**
+   * Canonical absolute URL of the wrapped module: its registration identity
+   * for `Hook`/`addHook` and the `parentURL` of its re-exports. It must be the
+   * exact string `resolve` returns for the module, so the graph recognizes it.
+   * The facade's placeholders never change it.
+   */
+  url: string
   /** The specifier the module was imported by, reported to hooks. */
   specifier: string
 }
 
+// Adapters are optional, and `undefined` counts as omitted, also under
+// `exactOptionalPropertyTypes`.
 type WrapperSyncAdapters = {
-  resolve: (specifier: string, context: WrapperResolveContext) => WrapperResolveResult
-  load: (url: string, context: WrapperLoadContext) => WrapperLoadResult
+  /** Required only when analysis encounters a star or CommonJS re-export. */
+  resolve?: ((specifier: string, context: WrapperResolveContext) => WrapperResolveResult) | undefined
+  /** Required only when analysis encounters a star or CommonJS re-export of a non-builtin. */
+  load?: ((url: string, context: WrapperLoadContext) => WrapperLoadResult) | undefined
 }
 
 type WrapperAsyncAdapters = {
-  resolve: (specifier: string, context: WrapperResolveContext) => WrapperResolveResult | PromiseLike<WrapperResolveResult>
-  load: (url: string, context: WrapperLoadContext) => WrapperLoadResult | PromiseLike<WrapperLoadResult>
+  /** Required only when analysis encounters a star or CommonJS re-export. */
+  resolve?: ((specifier: string, context: WrapperResolveContext) => WrapperResolveResult | PromiseLike<WrapperResolveResult>) | undefined
+  /** Required only when analysis encounters a star or CommonJS re-export of a non-builtin. */
+  load?: ((url: string, context: WrapperLoadContext) => WrapperLoadResult | PromiseLike<WrapperLoadResult>) | undefined
 }
 
 /** The module to wrap: ESM source the caller provides, or a builtin. */
-type WrapperRoot<Adapters> = CreateWrapperModuleBaseOptions & (
-  | ({
+type WrapperRoot<Adapters> = CreateWrapperModuleBaseOptions & Adapters & (
+  | {
       /**
-       * Canonical absolute URL of the wrapped module: its registration
-       * identity for `Hook`/`addHook` and the `parentURL` of its re-exports.
-       * It must be the exact string `resolve` returns for the module, so the
-       * graph recognizes it. The facade's placeholders never change it.
+       * The module's ESM JavaScript source; `load` is never called for this
+       * URL. Byte input is decoded as UTF-8. The caller transpiles
+       * TypeScript/JSX and decides that the module is ESM; IITM does not infer
+       * it.
        */
-      url: string
-      /**
-       * The module's ESM JavaScript source. The caller decodes bytes,
-       * transpiles TypeScript/JSX and decides that the module is ESM; IITM does
-       * not infer it.
-       */
-      source: string
-    } & Adapters)
-  | ({
+      source: WrapperSource
+    }
+  | {
       /**
        * A Node.js builtin, as a `node:` URL (`node:fs`, not `fs`). Its exports
-       * come from the builtin itself, so no source is given and the adapters,
-       * which a builtin never needs, are optional. A `node:` URL given with
-       * `source` also matches the branch above, so only the runtime rejects it.
+       * come from the builtin itself, so no source is given and the adapters
+       * are never called. A `node:` URL given with `source` also matches the
+       * branch above, so only the runtime rejects it.
        */
       url: `node:${string}`
       source?: undefined
-    } & Partial<Adapters>)
+    }
 )
 
 /** Options of {@link createWrapperModule}: adapters may return Promises. */
@@ -138,7 +150,9 @@ export type CreateWrapperModuleOptions = WrapperRoot<WrapperAsyncAdapters>
 export type CreateWrapperModuleSyncOptions = WrapperRoot<WrapperSyncAdapters>
 
 /**
- * EXPERIMENTAL: this API may change in minor versions.
+ * EXPERIMENTAL: not covered by semantic versioning. This API may change or
+ * be removed in any release, including patch releases, without a
+ * deprecation period.
  *
  * Generates an IITM ESM facade for a caller-selected ESM module, using
  * caller-provided source and module-graph access, or for a Node.js builtin
@@ -147,17 +161,23 @@ export type CreateWrapperModuleSyncOptions = WrapperRoot<WrapperSyncAdapters>
  * placeholders listed in `imports`, re-exports the module's bindings, and
  * registers it with `Hook`/`addHook` under `url`.
  *
+ * `resolve` and `load` are required only when analysis needs them; a missing
+ * adapter fails with context when first needed.
+ *
  * Invalid options and adapter failures reject the returned Promise.
  *
  * ```js
  * const { code, imports } = await createWrapperModule({ url, source, specifier, resolve, load })
+ * const leaf = await createWrapperModule({ url, source: 'export const a = 1', specifier })
  * const builtin = await createWrapperModule({ url: 'node:http', specifier: 'http' })
  * ```
  */
 export declare function createWrapperModule (options: CreateWrapperModuleOptions): Promise<WrapperModule>
 
 /**
- * EXPERIMENTAL: this API may change in minor versions.
+ * EXPERIMENTAL: not covered by semantic versioning. This API may change or
+ * be removed in any release, including patch releases, without a
+ * deprecation period.
  *
  * Synchronous {@link createWrapperModule}, for synchronous hooks such as
  * `module.registerHooks()`. `resolve` and `load` must return synchronously; a

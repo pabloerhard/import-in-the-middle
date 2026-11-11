@@ -36,16 +36,18 @@ try {
   const consumer = join(directory, 'consumer.mts')
   copyFileSync(new URL('../fixtures/wrapper-types.mts', import.meta.url), consumer)
 
-  for (const mode of ['Node16', 'NodeNext']) {
+  for (const [mode, exactOptionalPropertyTypes] of [['Node16', false], ['NodeNext', false], ['NodeNext', true]]) {
     const program = ts.createProgram([consumer], {
       module: ts.ModuleKind[mode],
       moduleResolution: ts.ModuleResolutionKind[mode],
       noEmit: true,
       strict: true,
+      exactOptionalPropertyTypes,
       types: []
     })
     const diagnostics = ts.getPreEmitDiagnostics(program)
-    assert.equal(diagnostics.length, 0, `${mode}:\n${ts.formatDiagnostics(diagnostics, {
+    const label = exactOptionalPropertyTypes ? `${mode} with exactOptionalPropertyTypes` : mode
+    assert.equal(diagnostics.length, 0, `${label}:\n${ts.formatDiagnostics(diagnostics, {
       getCanonicalFileName: ts.sys.resolvePath,
       getCurrentDirectory: ts.sys.getCurrentDirectory,
       getNewLine: () => '\n'

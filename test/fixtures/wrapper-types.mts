@@ -5,6 +5,7 @@ import {
   type CreateWrapperModuleSyncOptions,
   type WrapperImport,
   type WrapperModule,
+  type WrapperSource,
   type WrapperResolveResult,
   type WrapperLoadResult
 } from 'import-in-the-middle/wrapper.mjs'
@@ -23,6 +24,35 @@ const b2: Promise<WrapperModule> = createWrapperModule({ url: 'node:http', speci
 const b3: Promise<WrapperModule> = createWrapperModule({ url: 'node:http', specifier: 'http', resolve: ra, load: la })
 const syncOptions: CreateWrapperModuleSyncOptions = { ...base, resolve: rs, load: ls }
 const asyncOptions: CreateWrapperModuleOptions = syncOptions
+const leaf: WrapperModule = createWrapperModuleSync(base)
+const asyncLeaf: Promise<WrapperModule> = createWrapperModule(base)
+const resolvedOnly: WrapperModule = createWrapperModuleSync({ ...base, resolve: rs })
+const loadedOnly: Promise<WrapperModule> = createWrapperModule({ ...base, load: la })
+// An explicit `undefined` adapter counts as omitted, also under
+// `exactOptionalPropertyTypes`.
+declare const maybeResolve: typeof rs | undefined
+declare const maybeLoad: typeof la | undefined
+createWrapperModuleSync({ ...base, resolve: maybeResolve, load: undefined })
+createWrapperModule({ ...base, resolve: undefined, load: maybeLoad })
+
+const sources: WrapperSource[] = ['', new ArrayBuffer(0), new Uint8Array(0), new DataView(new ArrayBuffer(0))]
+for (const source of sources) {
+  createWrapperModuleSync({ ...base, source })
+  createWrapperModule({ ...base, source })
+}
+
+// Optional callbacks retain contextual parameter types.
+createWrapperModuleSync({
+  ...base,
+  resolve(specifier, { parentURL, kind }) {
+    const k: 'import' | 'require' = kind
+    return { url: new URL(specifier, parentURL).href, format: k === 'import' ? 'module' : 'commonjs' }
+  },
+  load(url, { format }) {
+    const u: string = url
+    return { source: new Uint8Array(u.length), format }
+  }
+})
 
 const code: string = s.code
 const first: WrapperImport | undefined = s.imports[0]
@@ -44,19 +74,25 @@ const bad: Promise<WrapperModule> = createWrapperModuleSync({ ...base, resolve: 
 const bad2: WrapperModule = createWrapperModule({ ...base, resolve: rs, load: ls })
 // @ts-expect-error the result is not a string
 const bad3: string = createWrapperModuleSync({ ...base, resolve: rs, load: ls })
-// @ts-expect-error source is required
+// @ts-expect-error source is required for a non-builtin
 createWrapperModuleSync({ url: 'file:///a.mjs', specifier: 'a', resolve: rs, load: ls })
-// @ts-expect-error source is required
+// @ts-expect-error source is required for a non-builtin
 createWrapperModule({ url: 'file:///a.mjs', specifier: 'a', resolve: ra, load: la })
 // @ts-expect-error mapImport was replaced by the imports manifest
 createWrapperModuleSync({ ...base, resolve: rs, load: ls, mapImport: (u: string) => u })
 
-// @ts-expect-error only a node: URL may omit source and adapters
+// @ts-expect-error only a node: URL may omit source
 createWrapperModuleSync({ url: 'file:///a.mjs', specifier: 'a' })
-// @ts-expect-error only a node: URL may omit source and adapters
+// @ts-expect-error only a node: URL may omit source
 createWrapperModule({ url: 'file:///a.mjs', specifier: 'a' })
 // @ts-expect-error async adapters for a builtin in createWrapperModuleSync
 createWrapperModuleSync({ url: 'node:http', specifier: 'http', resolve: ra })
+// @ts-expect-error source may not be undefined for a non-builtin
+createWrapperModuleSync({ ...base, source: undefined, load: ls })
+// @ts-expect-error source must be JavaScript text or bytes
+createWrapperModuleSync({ ...base, source: 42 })
+// @ts-expect-error optional does not allow non-function adapters
+createWrapperModuleSync({ ...base, resolve: null })
 // A `node:` url given with `source` and adapters still type-checks against the
 // non-builtin branch (TypeScript cannot exclude a `node:` prefix from `string`);
 // only the runtime rejects it, which test/wrapper/errors.mjs covers.
@@ -70,5 +106,6 @@ first?.target
 
 export {
   s, p1, p2, b1, b2, b3, syncOptions, asyncOptions, bad, bad2, bad3,
+  leaf, asyncLeaf, resolvedOnly, loadedOnly,
   code, kind, url, format, placeholder, exactKind
 }

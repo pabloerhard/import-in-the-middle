@@ -92,7 +92,8 @@ try {
 
       const { code, imports } = createWrapperModuleSync({
         url,
-        source: sourceOf(result, url),
+        // The hook's source may be bytes, which the wrapper accepts as-is.
+        source: result.source ?? sourceOf(result, url),
         specifier: specifiers.get(url) ?? url,
         resolve (s, { parentURL, kind }) {
           // Specifiers arrive as written. A `nextResolve` captured from a
