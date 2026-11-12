@@ -426,7 +426,7 @@ your adapters consult on their own (such as a `package.json`).
   instance** that your `Hook`/`addHook` calls use. If your tool keeps symlinked
   paths (for example esbuild's `preserveSymlinks`), resolve it to the path your
   `import-in-the-middle` import resolves to. The URL is computed from the
-  location of `wrapper.mjs`, so keep `import-in-the-middle` external when
+  location of `wrapper/create-wrapper.mjs`, so keep `import-in-the-middle` external when
   bundling the tool that calls `createWrapperModule`.
 
 Registration, and therefore hook matching, always uses `url`. Placeholders

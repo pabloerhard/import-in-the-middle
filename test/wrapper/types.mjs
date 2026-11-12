@@ -1,11 +1,11 @@
-// Type-checks a consumer of the packed `import-in-the-middle/wrapper.mjs` entry.
+// Checks runtime imports and types of the packed `import-in-the-middle/wrapper.mjs` entry.
 
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 import ts from 'typescript'
@@ -23,7 +23,7 @@ try {
   })
   const [{ files }] = JSON.parse(stdout)
   const paths = files.map(({ path }) => path.replace(/\\/g, '/'))
-  for (const expected of ['wrapper.mjs', 'wrapper.d.mts', 'lib/wrapper.mjs']) {
+  for (const expected of ['wrapper.mjs', 'wrapper.d.mts', 'wrapper/create-wrapper.mjs', 'lib/wrapper.mjs']) {
     assert.ok(paths.includes(expected), `packed files should include ${expected}`)
   }
 
@@ -33,6 +33,14 @@ try {
     mkdirSync(dirname(destination), { recursive: true })
     copyFileSync(join(root, path), destination)
   }
+  // Use the installed dependencies without fetching packages for this fixture.
+  symlinkSync(join(root, 'node_modules'), join(packageDirectory, 'node_modules'), 'junction')
+  const { createWrapperModule, createWrapperModuleSync } = await import(pathToFileURL(join(packageDirectory, 'wrapper.mjs')).href)
+  const options = { url: 'file:///app/example.mjs', source: 'export const value = 1', specifier: './example.mjs' }
+  const wrapper = createWrapperModuleSync(options)
+  assert.equal(wrapper.imports[0].url, pathToFileURL(realpathSync(join(packageDirectory, 'lib/register.js'))).href)
+  assert.deepEqual(await createWrapperModule(options), wrapper)
+
   const consumer = join(directory, 'consumer.mts')
   copyFileSync(new URL('../fixtures/wrapper-types.mts', import.meta.url), consumer)
 

@@ -54,7 +54,7 @@ export type WrapperLoadResult = {
  *
  * - `runtime`: IITM's registration runtime (`lib/register.js` of this copy).
  *   It must load the same instance that `Hook`/`addHook` use. Its URL is
- *   computed from the location of `wrapper.mjs`, so keep
+ *   computed from the location of `wrapper/create-wrapper.mjs`, so keep
  *   `import-in-the-middle` external when bundling the calling tool.
  * - `original`: the wrapped module itself. It must load the original,
  *   unwrapped module: resolving it back to the facade makes the facade import
